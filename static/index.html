@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Calendar</title>
+  <meta name="description" content="Self-hosted calendar">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1f1f1f" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Calendar">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <button class="icon-btn" id="menuBtn" aria-label="Main menu" title="Main menu">
+        <svg viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+      </button>
+      <div class="brand">
+        <img src="/icons/icon.svg" alt="" width="32" height="32">
+        <span>Calendar</span>
+      </div>
+      <button class="btn outline" id="todayBtn" title="Today (T)">Today</button>
+      <div class="nav-arrows">
+        <button class="icon-btn" id="prevBtn" aria-label="Previous" title="Previous (K)">
+          <svg viewBox="0 0 24 24"><path d="M15.4 7.4 14 6l-6 6 6 6 1.4-1.4L10.8 12z"/></svg>
+        </button>
+        <button class="icon-btn" id="nextBtn" aria-label="Next" title="Next (J)">
+          <svg viewBox="0 0 24 24"><path d="M8.6 16.6 10 18l6-6-6-6-1.4 1.4 4.6 4.6z"/></svg>
+        </button>
+      </div>
+      <h1 id="title" class="title"></h1>
+      <div class="spacer"></div>
+      <div class="search" id="searchWrap">
+        <button class="icon-btn" id="searchBtn" aria-label="Search" title="Search (/)">
+          <svg viewBox="0 0 24 24"><path d="M15.5 14h-.8l-.3-.3A6.5 6.5 0 1 0 9.5 16a6.5 6.5 0 0 0 4.2-1.6l.3.3v.8l5 5 1.5-1.5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9"/></svg>
+        </button>
+        <input id="searchInput" type="search" placeholder="Search events" autocomplete="off">
+      </div>
+      <span id="syncIndicator" class="sync-indicator" hidden title="Offline - showing saved data">Offline</span>
+      <select id="viewSelect" class="view-select" aria-label="View">
+        <option value="day">Day</option>
+        <option value="3day">3 days</option>
+        <option value="week">Week</option>
+        <option value="month">Month</option>
+        <option value="schedule">Schedule</option>
+      </select>
+      <button class="icon-btn" id="settingsBtn" aria-label="Settings" title="Settings">
+        <svg viewBox="0 0 24 24"><path d="M19.1 12.9a7 7 0 0 0 0-1.8l2-1.6-2-3.4-2.4 1a7 7 0 0 0-1.5-.9L14.8 3h-4l-.4 2.6a7 7 0 0 0-1.5.9l-2.4-1-2 3.4 2 1.6a7 7 0 0 0 0 1.8l-2 1.6 2 3.4 2.4-1q.7.6 1.5.9l.4 2.6h4l.4-2.6q.8-.3 1.5-.9l2.4 1 2-3.4zM12.8 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7"/></svg>
+      </button>
+    </header>
+
+    <div class="body">
+      <aside class="sidebar" id="sidebar">
+        <button class="create-btn" id="createBtn" title="Create (C)">
+          <svg viewBox="0 0 36 36"><path fill="#34A853" d="M16 16v14h4V20z"/><path fill="#4285F4" d="M30 16H20l-4 4h14z"/><path fill="#FBBC05" d="M6 16v4h10l4-4z"/><path fill="#EA4335" d="M20 16V6h-4v14z"/></svg>
+          <span>Create</span>
+        </button>
+        <div id="miniCal" class="mini-cal"></div>
+        <div class="cal-section">
+          <div class="cal-section-head">
+            <span>My calendars</span>
+            <button class="icon-btn small" id="addCalBtn" aria-label="Add calendar" title="Add or subscribe to a calendar">
+              <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
+            </button>
+          </div>
+          <ul id="myCals" class="cal-list"></ul>
+        </div>
+        <div class="cal-section" id="otherSection">
+          <div class="cal-section-head"><span>Other calendars</span></div>
+          <ul id="otherCals" class="cal-list"></ul>
+        </div>
+      </aside>
+      <div class="scrim" id="scrim"></div>
+      <main class="main" id="main"></main>
+    </div>
+
+    <button class="fab" id="fab" aria-label="Create event">
+      <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
+    </button>
+  </div>
+
+  <!-- Login / setup -->
+  <div id="login" class="login" hidden>
+    <form id="loginForm" class="login-card">
+      <img src="/icons/icon.svg" alt="" width="56" height="56">
+      <h2 id="loginTitle">Sign in</h2>
+      <p id="loginHint" class="muted">Enter your calendar password.</p>
+      <input id="loginPassword" type="password" placeholder="Password" autocomplete="current-password" required>
+      <input id="loginPassword2" type="password" placeholder="Confirm password" autocomplete="new-password" hidden>
+      <p id="loginError" class="error" hidden></p>
+      <button class="btn primary" type="submit" id="loginSubmit">Sign in</button>
+    </form>
+  </div>
+
+  <!-- Event detail popover -->
+  <div id="popover" class="popover" hidden role="dialog" aria-modal="false"></div>
+
+  <!-- Generic modal -->
+  <div id="modalBackdrop" class="modal-backdrop" hidden>
+    <div id="modal" class="modal" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

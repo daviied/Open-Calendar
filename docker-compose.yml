@@ -1,0 +1,28 @@
+services:
+  calendar:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+    ports:
+      - "8080:8080"
+
+  # Optional: automatic HTTPS with Caddy. Point a domain at this machine,
+  # put it in the Caddyfile, set CAL_BASE_URL=https://your.domain in .env,
+  # then run:  docker compose --profile https up -d
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - calendar
+
+volumes:
+  caddy_data:
