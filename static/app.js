@@ -332,7 +332,10 @@ function renderTitle() {
   const mon = isMobile() ? "short" : "long";
   let t;
   if (state.search) t = "Search";
-  else if (isMobile() && state.view !== "day") t = fmtDate(state.view === "month" || state.view === "schedule" ? d : visibleRange()[0], { month: "short", year: "numeric" });
+  else if (isMobile()) {
+    const ref = state.view === "month" || state.view === "schedule" ? d : visibleRange()[0];
+    t = fmtDate(ref, { month: "long", ...(ref.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) });
+  }
   else if (state.view === "day") t = fmtDate(d, { month: mon, day: "numeric", year: "numeric" });
   else if (state.view === "month" || state.view === "schedule") t = fmtDate(d, { month: "long", year: "numeric" });
   else {
@@ -347,7 +350,6 @@ function renderTitle() {
 }
 
 function renderMini() {
-  const el = $("#miniCal");
   const m = state.miniDate;
   const first = new Date(m.getFullYear(), m.getMonth(), 1);
   const s = startOfWeek(first);
@@ -363,7 +365,19 @@ function renderMini() {
                  rs && d >= rs && d < re && "in-range"].filter(Boolean).join(" ");
     html += `<button class="${cls}" data-date="${ymd(d)}">${d.getDate()}</button>`;
   }
-  el.innerHTML = html + "</div>";
+  html += "</div>";
+  $("#miniCal").innerHTML = html;
+  $("#miniDrop").innerHTML = html;
+  $("#todayNum").textContent = today.getDate();
+  $$("#viewList [data-view]").forEach((b) => b.classList.toggle("on", b.dataset.view === state.view && !state.search));
+}
+
+function setMiniDrop(open) {
+  const drop = $("#miniDrop");
+  if (open) { state.miniDate = state.date; renderMini(); pushOverlay(); }
+  drop.hidden = !open;
+  $("#titleBtn").setAttribute("aria-expanded", String(open));
+  if (state.view === "month") render(); // month rows depend on the available height
 }
 
 function renderCalendarList() {
@@ -436,6 +450,7 @@ function renderTimeGrid(main) {
   head += "</div></div>";
 
   // all-day lanes
+  const LANE = isMobile() ? 24 : 22;
   const items = spanItems(days, longEvents);
   const laneCount = laneLayout(items);
   const maxLanes = state.alldayExpanded ? laneCount : Math.min(laneCount, 3);
@@ -446,15 +461,15 @@ function renderTimeGrid(main) {
       for (let c = it.s; c <= it.e; c++) hidden[c]++;
       continue;
     }
-    bars += barHtml(it, n, it.lane, 22, 2, now);
+    bars += barHtml(it, n, it.lane, LANE, 2, now);
   }
   let moreLinks = "";
   const showLanes = laneCount > maxLanes ? maxLanes : laneCount;
   hidden.forEach((h, c) => {
-    if (h) moreLinks += `<div class="more-link" data-allday-more style="left:calc(${(c / n) * 100}% + 2px);top:${(showLanes - (laneCount > maxLanes ? 1 : 0)) * 22 + 2}px">${h} more</div>`;
+    if (h) moreLinks += `<div class="more-link" data-allday-more style="left:calc(${(c / n) * 100}% + 2px);top:${(showLanes - (laneCount > maxLanes ? 1 : 0)) * LANE + 2}px">${h} more</div>`;
   });
   const lanesShown = Math.max(showLanes, 0);
-  const alldayHeight = Math.max(lanesShown * 22 + 6, 24);
+  const alldayHeight = Math.max(lanesShown * LANE + 6, 24);
   const allday = `<div class="allday-row"><div class="gutter"></div><div class="lanes" style="--cols:${n};height:${alldayHeight}px" data-allday>
       ${days.map((d) => `<div class="cell" data-allday-date="${ymd(d)}"></div>`).join("")}
       <div style="position:absolute;inset:0;pointer-events:none"><div style="position:relative;height:100%;pointer-events:none">${bars}${moreLinks}</div></div>
@@ -566,8 +581,8 @@ function renderMonth(main) {
     <div class="month-rows" style="grid-template-rows:repeat(${weeks},1fr)"></div></div>`;
   const rows = $(".month-rows", main);
   const rowH = rows.clientHeight / weeks;
-  const laneH = 22;
-  const maxLanes = Math.max(1, Math.floor((rowH - 32) / laneH));
+  const laneH = isMobile() ? 19 : 22;
+  const maxLanes = Math.max(1, Math.floor((rowH - (isMobile() ? 28 : 32)) / laneH));
   let html = "";
   for (let w = 0; w < weeks; w++) {
     const days = Array.from({ length: 7 }, (_, i) => addDays(start, w * 7 + i));
@@ -682,6 +697,7 @@ function openPopover(ev, anchor) {
     ${rem.length ? `<div class="pop-row">${icon("bell")}<div>${rem.map((m) => esc(fmtMinutes(m))).join("<br>")}</div></div>` : ""}
     <div class="pop-row">${icon("cal")}<div>${esc(cal?.name || "")}${cal?.account_email ? `<div class="muted">${esc(cal.account_email)}</div>` : ""}</div></div>`;
   pop.hidden = false;
+  pushOverlay();
   pop.onclick = async (e) => {
     const act = e.target.closest("[data-act]")?.dataset.act;
     if (act === "close") closePopover();
@@ -709,7 +725,20 @@ function sourceName(cal) {
 
 // ------------------------------------------------------------------ modal helpers
 
+// Phones: the Back button closes whatever sheet/dialog/drawer is open instead of leaving the app.
+// One history entry stands in for "something is open"; it is reused rather than stacked.
+function pushOverlay() {
+  if (isMobile() && !history.state?.overlay) history.pushState({ overlay: true }, "");
+}
+function closeOverlays() {
+  closeModal();
+  closePopover();
+  $("#app").classList.remove("sidebar-open");
+  if (!$("#miniDrop").hidden) setMiniDrop(false);
+}
+
 function openModal(html, { wide = false } = {}) {
+  pushOverlay();
   const bd = $("#modalBackdrop"), m = $("#modal");
   m.className = "modal" + (wide ? " wide" : "");
   m.innerHTML = html;
@@ -781,16 +810,18 @@ function openEditor(ev, defaults = {}) {
   const rrule = ev?.rrule || "";
 
   const m = openModal(`<form id="evForm">
-    <div class="modal-head"><h2>${isNew ? "New event" : "Edit event"}</h2><button type="button" class="icon-btn" data-x>${icon("close")}</button></div>
+    <div class="modal-head"><button type="button" class="icon-btn head-x" data-x aria-label="Close">${icon("close")}</button>
+      <h2>${isNew ? "New event" : "Edit event"}</h2><button type="submit" class="btn primary head-save">Save</button></div>
     <div class="modal-body">
       <input class="title-input" name="title" placeholder="Add title" value="${esc(ev?.title === "(No title)" ? "" : ev?.title || "")}" autocomplete="off">
       <div class="field"><label class="toggle"><input type="checkbox" name="all_day" ${allDay ? "checked" : ""}> All day</label></div>
-      <div class="row">
-        <input type="date" name="sdate" value="${ymd(s)}" required class="grow">
-        <input type="time" name="stime" value="${hm(s)}" step="900" data-timed>
-        <span>to</span>
-        <input type="time" name="etime" value="${hm(e)}" step="900" data-timed>
-        <input type="date" name="edate" value="${ymd(endShown)}" required class="grow">
+      <div class="when ${allDay ? "all-day" : ""}">
+        <div class="when-row"><span>Starts</span>
+          <input type="date" name="sdate" value="${ymd(s)}" required>
+          <input type="time" name="stime" value="${hm(s)}" step="900" data-timed></div>
+        <div class="when-row"><span>Ends</span>
+          <input type="date" name="edate" value="${ymd(endShown)}" required>
+          <input type="time" name="etime" value="${hm(e)}" step="900" data-timed></div>
       </div>
       <div class="field"><span>Repeat</span><select name="repeat"></select></div>
       <div id="customRepeat" hidden class="help">
@@ -815,7 +846,7 @@ function openEditor(ev, defaults = {}) {
     <div class="modal-foot">
       ${isNew ? "" : `<button type="button" class="btn danger left" data-del>Delete</button>`}
       <button type="button" class="btn text" data-x>Cancel</button>
-      <button type="submit" class="btn primary">Save</button>
+      <button type="submit" class="btn primary foot-save">Save</button>
     </div></form>`);
 
   const f = $("#evForm", m);
@@ -823,8 +854,7 @@ function openEditor(ev, defaults = {}) {
   const byday = new Set();
 
   const syncTimed = () => {
-    const ad = f.all_day.checked;
-    $$("[data-timed]", f).forEach((x) => (x.hidden = ad));
+    $(".when", f).classList.toggle("all-day", f.all_day.checked);
   };
   const fillRepeat = () => {
     const d = parseYMD(f.sdate.value || ymd(s));
@@ -1339,8 +1369,9 @@ function registerSW() {
 
 function toggleSidebar() {
   const app = $("#app");
-  if (isMobile()) app.classList.toggle("sidebar-open");
-  else app.classList.toggle("sidebar-hidden");
+  if (isMobile()) {
+    if (app.classList.toggle("sidebar-open")) { setMiniDrop(false); pushOverlay(); }
+  } else app.classList.toggle("sidebar-hidden");
 }
 
 function bindUI() {
@@ -1367,12 +1398,25 @@ function bindUI() {
   si.onblur = () => { if (!si.value) sw.classList.remove("open"); };
   si.oninput = () => { if (!si.value && state.search) { state.search = null; render(); } };
 
-  $("#miniCal").onclick = (e) => {
+  const miniClick = (e) => {
     const nav = e.target.closest("[data-mini]");
     if (nav) { state.miniDate = addMonths(state.miniDate, Number(nav.dataset.mini)); return renderMini(); }
     const d = e.target.closest("[data-date]")?.dataset.date;
-    if (d) { gotoDate(parseYMD(d)); $("#app").classList.remove("sidebar-open"); }
+    if (d) { $("#app").classList.remove("sidebar-open"); setMiniDrop(false); gotoDate(parseYMD(d)); }
   };
+  $("#miniCal").onclick = miniClick;
+  $("#miniDrop").onclick = miniClick;
+
+  // phone header + drawer
+  $("#titleBtn").onclick = () => { if (isMobile()) setMiniDrop($("#miniDrop").hidden); };
+  $("#todayIconBtn").onclick = () => { setMiniDrop(false); gotoDate(new Date()); };
+  $("#viewList").onclick = (e) => {
+    const v = e.target.closest("[data-view]")?.dataset.view;
+    if (!v) return;
+    $("#app").classList.remove("sidebar-open");
+    setView(v);
+  };
+  $("#drawerSettings").onclick = () => { $("#app").classList.remove("sidebar-open"); settingsDialog(); };
 
   const calLists = (e) => {
     const t = e.target.closest("[data-toggle]");
@@ -1411,6 +1455,8 @@ function bindUI() {
     const mc = e.target.closest("[data-mdate]");
     if (mc) {
       const d = parseYMD(mc.dataset.mdate);
+      // On phones the cells are too small to aim at: tapping a day opens it instead.
+      if (isMobile()) return gotoDate(d, "day");
       return openEditor(null, { all_day: true, start: d, end: addDays(d, 1) });
     }
   });
@@ -1457,6 +1503,7 @@ function bindUI() {
 
   window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); installPrompt = e; });
   window.addEventListener("online", () => refresh(true));
+  window.addEventListener("popstate", closeOverlays);
 }
 
 boot();

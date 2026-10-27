@@ -105,6 +105,9 @@ async def auth_middleware(request: Request, call_next):
     response = await call_next(request)
     if path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
+    elif "cache-control" not in response.headers:
+        # App files: always check with the server (cheap 304s) so updates reach phones right away.
+        response.headers["Cache-Control"] = "no-cache"
     if request.url.scheme == "https":
         # Behind an HTTPS proxy, have the browser upgrade any stray http:// request instead of
         # flagging the page as "not secure". Only sent over HTTPS so plain-http LAN access keeps working.
