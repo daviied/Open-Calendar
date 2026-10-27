@@ -443,6 +443,9 @@ async def sync_calendar(cal_id: int) -> None:
         async with httpx.AsyncClient(timeout=60) as client:
             if cal["source"] == "ics":
                 await sync_ics(cal, client)
+                if cal["assignments"] == 2:
+                    from .tasks import import_calendar_tasks  # tasks imports events; keep sync import-light
+                    import_calendar_tasks(cal_id)
             else:
                 account = db.one("SELECT * FROM accounts WHERE id=?", (cal["account_id"],))
                 if not account:

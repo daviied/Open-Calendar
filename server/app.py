@@ -212,7 +212,7 @@ def _calendar_out(c: dict, accounts: dict) -> dict:
         "id": c["id"], "name": c["name"], "color": c["color"], "source": c["source"],
         "url": c["url"], "visible": bool(c["visible"]), "read_only": bool(c["read_only"]),
         "default_reminders": json.loads(c["default_reminders"]),
-        "last_synced": c["last_synced"], "sync_error": c["sync_error"], "assignments": bool(c["assignments"]),
+        "last_synced": c["last_synced"], "sync_error": c["sync_error"], "assignments": c["assignments"],
         "account_id": c["account_id"], "account_email": acc["email"] if acc else None,
     }
 
@@ -236,8 +236,11 @@ async def create_calendar(request: Request):
         url = (body.get("url") or "").strip()
         if not url.lower().startswith(("http://", "https://", "webcal://")):
             raise HTTPException(400, "Enter a valid calendar feed URL")
+        mode = _assignment_mode(body.get("assignments"), "ics")
         cid = db.execute("INSERT INTO calendars(name, color, source, url, read_only, assignments) VALUES(?,?,?,?,1,?)",
-                         (name, color, "ics", url, 1 if body.get("assignments") else 0))
+                         (name, color, "ics", url, mode))
+        if mode == 2:
+            db.set_setting(f"import_since:{cid}", time.time())
         await sync.sync_calendar(cid)
     else:
         cid = db.execute("INSERT INTO calendars(name, color, source) VALUES(?,?,'local')", (name, color))
@@ -260,13 +263,24 @@ async def edit_calendar(cal_id: int, request: Request):
     if "default_reminders" in body:
         fields["default_reminders"] = json.dumps(sorted({int(m) for m in body["default_reminders"]}))
     if "assignments" in body:
-        fields["assignments"] = 1 if body["assignments"] else 0
+        fields["assignments"] = _assignment_mode(body["assignments"], cal["source"])
     if "url" in body and cal["source"] == "ics":
         fields["url"] = str(body["url"]).strip()
     if fields:
         db.execute(f"UPDATE calendars SET {','.join(k + '=?' for k in fields)} WHERE id=?",
                    list(fields.values()) + [cal_id])
+    if "assignments" in fields and fields["assignments"] != cal["assignments"]:
+        tasks.set_import_mode(cal_id, cal["assignments"], fields["assignments"])
     return {"ok": True}
+
+
+def _assignment_mode(value, source: str) -> int:
+    """0 = normal, 1 = also list on the Assignments tab, 2 = turn events into assignments (feeds only,
+    since two-way Google/Outlook calendars need their events to stay events)."""
+    mode = 1 if value is True else 0 if value in (False, None) else int(value)
+    if mode == 2 and source != "ics":
+        raise HTTPException(400, "Only subscribed (feed) calendars can be turned into assignments")
+    return max(0, min(2, mode))
 
 
 @app.delete("/api/calendars/{cal_id}")

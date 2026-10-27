@@ -723,7 +723,7 @@ function openPopover(ev, anchor) {
   const where = ev.kind === "task" ? (ev.course || "Assignment") : ev.kind === "card" ? `${ev.board_name} · ${ev.list_name}` : null;
   pop.innerHTML = `<div class="pop-actions">
       ${ev.read_only ? "" : `<button class="icon-btn" data-act="edit" title="Edit">${icon("edit")}</button>
-      <button class="icon-btn" data-act="delete" title="Delete">${icon("trash")}</button>`}
+      ${ev.imported ? "" : `<button class="icon-btn" data-act="delete" title="Delete">${icon("trash")}</button>`}`}
       <button class="icon-btn" data-act="close" title="Close">${icon("close")}</button></div>
     <div class="pop-row"><span class="sw" style="--c:${esc(ev.color)}"></span><div>
       <div class="pop-title"${ev.done ? ' style="text-decoration:line-through"' : ""}>${esc(ev.title)}</div>
@@ -1158,6 +1158,21 @@ let suppressClick = false;
 
 // ------------------------------------------------------------------ calendars & settings dialogs
 
+const ASSIGNMENT_MODES = [
+  [0, "Show as events", "Normal calendar events."],
+  [1, "Show as events and list them in Assignments", "Events stay on the calendar and are also listed on the Assignments tab so you can check them off."],
+  [2, "Create as assignments", "Every event becomes an assignment: check it off, add notes and reminders. Title and due date keep syncing. Items already past due start out completed."],
+];
+function assignmentModeSelect(id, value, allowImport) {
+  return `<select id="${id}">${ASSIGNMENT_MODES.filter(([v]) => v !== 2 || allowImport)
+    .map(([v, label]) => `<option value="${v}" ${Number(value) === v ? "selected" : ""}>${label}</option>`).join("")}</select>`;
+}
+function bindAssignmentModeHelp(select, help) {
+  const show = () => { help.textContent = ASSIGNMENT_MODES.find(([v]) => v === Number(select.value))[2]; };
+  select.addEventListener("change", show);
+  show();
+}
+
 function calendarDialog(cal) {
   const m = openModal(`<div class="modal-head"><h2>${esc(cal.name)}</h2><button class="icon-btn" data-x>${icon("close")}</button></div>
     <div class="modal-body">
@@ -1166,9 +1181,8 @@ function calendarDialog(cal) {
       <div class="field"><span>Default notifications (minutes before; comma separated, blank for none)</span>
         <input type="text" id="cRem" value="${esc((cal.default_reminders || []).join(", "))}"></div>
       ${cal.source === "ics" ? `<div class="field"><span>Feed URL</span><input type="url" id="cUrl" value="${esc(cal.url || "")}"></div>` : ""}
-      <label class="toggle" style="margin:8px 0"><input type="checkbox" id="cAssign" ${cal.assignments ? "checked" : ""}>
-        Show in Assignments</label>
-      <p class="muted" style="font-size:12px;margin:0 0 8px">Lists this calendar's events on the Assignments tab so you can check them off - handy for Canvas.</p>
+      <div class="field"><span>Events in this calendar</span>${assignmentModeSelect("cAssign", cal.assignments, cal.source === "ics")}</div>
+      <p class="muted" style="font-size:12px;margin:0 0 8px" id="cAssignHelp"></p>
       ${cal.source !== "local" ? `<p class="muted">Source: ${esc({ ics: "Subscribed feed (read-only)", google: "Google Calendar", microsoft: "Outlook / Microsoft 365" }[cal.source])}
         ${cal.account_email ? " · " + esc(cal.account_email) : ""}<br>Last synced: ${cal.last_synced ? new Date(cal.last_synced * 1000).toLocaleString() : "never"}</p>` : ""}
       ${cal.sync_error ? `<p class="error">Sync error: ${esc(cal.sync_error)}</p>` : ""}
@@ -1179,16 +1193,24 @@ function calendarDialog(cal) {
       <button class="btn primary" data-save>Save</button>
     </div>`);
   let color = cal.color;
+  bindAssignmentModeHelp($("#cAssign", m), $("#cAssignHelp", m));
   $("#cColor", m).onclick = (e) => {
     const b = e.target.closest("[data-color]"); if (!b) return;
     color = b.dataset.color; $$("#cColor button", m).forEach((x) => x.classList.toggle("on", x === b));
   };
   $("[data-x]", m).onclick = closeModal;
   $("[data-save]", m).onclick = async () => {
-    const body = { name: $("#cName", m).value, color, assignments: $("#cAssign", m).checked,
+    const mode = Number($("#cAssign", m).value);
+    if (cal.assignments === 2 && mode !== 2 &&
+        !confirm("Switch back to events? The assignments made from this calendar (and their check marks and notes) will be removed.")) return;
+    const body = { name: $("#cName", m).value, color, assignments: mode,
       default_reminders: $("#cRem", m).value.split(",").map((x) => x.trim()).filter(Boolean).map(Number).filter((n) => n >= 0) };
     if ($("#cUrl", m)) body.url = $("#cUrl", m).value;
-    try { await api(`/api/calendars/${cal.id}`, { method: "PATCH", body }); closeModal(); await loadCalendars(); refresh(true); }
+    try {
+      await api(`/api/calendars/${cal.id}`, { method: "PATCH", body });
+      closeModal(); await loadCalendars(); refresh(true); loadTaskBadge();
+      if (mode === 2 && cal.assignments !== 2) toast(`${cal.name} events are now assignments`, { label: "View", run: () => setMode("tasks") });
+    }
     catch (e) { toast(e.message); }
   };
   $("[data-sync]", m)?.addEventListener("click", async (e) => {
@@ -1241,7 +1263,8 @@ function addCalendarDialog(tab = "new") {
         <div class="field"><span>Calendar URL</span><input type="url" id="fUrl" placeholder="https://… or webcal://…"></div>
         <div class="row"><div class="field grow"><span>Name</span><input type="text" id="fName" value="Canvas"></div>
           <div class="field"><span>Color</span><div class="colors" id="fColor">${COLORS.map((c, i) => `<button type="button" style="--c:${c}" data-color="${c}" class="${i === 2 ? "on" : ""}"></button>`).join("")}</div></div></div>
-        <label class="toggle" style="margin:4px 0"><input type="checkbox" id="fAssign" checked> Show in Assignments (check items off as you finish them)</label>
+        <div class="field"><span>Events in this calendar</span>${assignmentModeSelect("fAssign", 2, true)}</div>
+        <p class="muted" style="font-size:12px;margin:0 0 8px" id="fAssignHelp"></p>
         <p class="error" id="fErr" hidden></p>
         <div class="modal-foot" style="padding:12px 0 8px"><button class="btn primary" id="fSave">Subscribe</button></div>`;
       let color = COLORS[2];
@@ -1250,14 +1273,17 @@ function addCalendarDialog(tab = "new") {
         $$("#feedKind .chip", m).forEach((c) => c.classList.toggle("on", c.dataset.k === k));
         $("#feedHelp", m).innerHTML = FEED_HELP[k];
         $("#fName", m).value = { canvas: "Canvas", outlook: "Outlook", google: "Google", other: "" }[k];
-        $("#fAssign", m).checked = k === "canvas";
+        $("#fAssign", m).value = k === "canvas" ? "2" : "0";
+        $("#fAssign", m).dispatchEvent(new Event("change"));
       };
+      bindAssignmentModeHelp($("#fAssign", m), $("#fAssignHelp", m));
       $("#fColor", m).onclick = (e) => { const b = e.target.closest("[data-color]"); if (!b) return; color = b.dataset.color; $$("#fColor button", m).forEach((x) => x.classList.toggle("on", x === b)); };
       $("#fSave", m).onclick = async (e) => {
         e.target.disabled = true; e.target.textContent = "Subscribing…";
         try {
           await api("/api/calendars", { method: "POST", body: { type: "ics", url: $("#fUrl", m).value, name: $("#fName", m).value || "Subscribed", color,
-            assignments: $("#fAssign", m).checked } });
+            assignments: Number($("#fAssign", m).value) } });
+          loadTaskBadge();
           closeModal(); await loadCalendars(); refresh(true);
           const bad = state.calendars.filter((c) => c.source === "ics" && c.sync_error).pop();
           if (bad) toast(`Subscribed, but sync failed: ${bad.sync_error}`); else toast("Subscribed");
@@ -1564,7 +1590,8 @@ function taskItemHtml(i) {
     <div class="ti-main"><div class="ti-title">${esc(i.title)}</div>
       <div class="ti-meta">${i.course ? `<span class="course-chip">${esc(i.course)}</span>` : ""}<span>${esc(fmtDue(i))}</span>
         ${relDue(i) ? `<span>· ${relDue(i)}</span>` : ""}
-        ${i.kind === "event" ? `<span class="ti-src">from ${esc(i.calendar_name)}</span>` : ""}</div></div></div>`;
+        ${i.kind === "event" ? `<span class="ti-src">from ${esc(i.calendar_name)}</span>` : ""}
+        ${i.imported && i.source_name ? `<span class="ti-src">from ${esc(i.source_name)}</span>` : ""}</div></div></div>`;
 }
 
 function renderTasks(main) {
@@ -1639,8 +1666,12 @@ function bindTasks(main) {
 }
 
 function taskFromItem(ev) {
+  // Prefer the full record from the Assignments list (it knows which calendar an imported one came from).
+  const full = state.assignments?.tasks.find((t) => t.id === ev.task_id);
+  if (full) return { ...full, kind: "task", task_id: full.id };
   return { kind: "task", task_id: ev.task_id, id: ev.task_id, title: ev.title, notes: ev.description, course: ev.course,
-           color: ev.color, due: ev.due, all_day: ev.all_day, done: ev.done, reminders: ev.reminders || [] };
+           color: ev.color, due: ev.due, all_day: ev.all_day, done: ev.done, reminders: ev.reminders || [],
+           imported: ev.imported, url: ev.url };
 }
 
 function openTaskEditor(task, defaults = {}) {
@@ -1663,14 +1694,17 @@ function openTaskEditor(task, defaults = {}) {
       <div class="field"><span>Color</span>${colorPicker(color, { allowNone: true })}</div>
       <div class="field"><span>Notes</span><textarea name="notes" placeholder="Details, links, rubric…">${esc(t.notes || "")}</textarea></div>
       ${!isNew ? `<label class="toggle"><input type="checkbox" name="done" ${t.done ? "checked" : ""}> Completed</label>` : ""}
+      ${t.imported ? `<div class="help">Synced from <b>${esc(t.source_name || "a subscribed calendar")}</b>: the name, due date and course
+        update automatically.${t.url ? ` <a href="${esc(t.url)}" target="_blank" rel="noopener">Open in ${esc(t.source_name || "source")}</a>` : ""}</div>` : ""}
     </div>
     <div class="modal-foot">
-      ${isNew ? "" : `<button type="button" class="btn danger left" data-del>Delete</button>`}
+      ${isNew || t.imported ? "" : `<button type="button" class="btn danger left" data-del>Delete</button>`}
       <button type="button" class="btn text" data-x>Cancel</button>
       <button type="submit" class="btn primary foot-save">Save</button>
     </div></form>`);
   const f = $("#taskForm", m);
-  setTimeout(() => f.title.focus(), 50);
+  if (t.imported) for (const n of ["title", "dueDate", "dueTime", "course"]) f[n].disabled = true;
+  else setTimeout(() => f.title.focus(), 50);
   bindColorPicker(m, (c) => (color = c));
   $("#remChips", m).onclick = (e) => {
     const b = e.target.closest("[data-rem]"); if (!b) return;
@@ -1682,8 +1716,10 @@ function openTaskEditor(task, defaults = {}) {
   $("[data-del]", m)?.addEventListener("click", () => { closeModal(); deleteTask(t.task_id ?? t.id); });
   f.onsubmit = async (e) => {
     e.preventDefault();
-    const body = { title: f.title.value, course: f.course.value, notes: f.notes.value, color: color || null,
-                   reminders: [...rem], ...readDue(f), ...(isNew ? {} : { done: f.done.checked }) };
+    const body = t.imported
+      ? { notes: f.notes.value, color: color || null, reminders: [...rem], done: f.done.checked }
+      : { title: f.title.value, course: f.course.value, notes: f.notes.value, color: color || null,
+          reminders: [...rem], ...readDue(f), ...(isNew ? {} : { done: f.done.checked }) };
     try {
       if (isNew) await api("/api/tasks", { method: "POST", body });
       else await api(`/api/tasks/${t.task_id ?? t.id}`, { method: "PATCH", body });

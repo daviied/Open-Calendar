@@ -165,6 +165,8 @@ def list_occurrences(range_start: datetime, range_end: datetime, visible_only=Tr
         cal = cals.get(ev["calendar_id"])
         if not cal or (visible_only and not cal["visible"]):
             continue
+        if cal.get("assignments") == 2:
+            continue  # these events were turned into assignments, which show instead
         out.extend(expand_event(ev, cal, range_start, range_end, done_keys))
     out.sort(key=lambda o: (o["start"], not o["all_day"]))
     return out

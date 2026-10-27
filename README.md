@@ -80,9 +80,16 @@ Canvas calendars come in as a feed. They're read-only, and that's all Canvas off
 
 Feeds refresh every 15 minutes (`CAL_SYNC_INTERVAL`).
 
-Leave **Show in Assignments** ticked when you subscribe. Canvas items then appear on the Assignments tab, with the
-course name taken from the `[COURSE]` part of the title, and you can check them off there. You can turn this on
-or off later for any calendar from the ⋮ menu next to it.
+When you subscribe, **Events in this calendar** defaults to **Create as assignments** for Canvas:
+
+- **Create as assignments:** every Canvas event becomes an assignment, with the course taken from the `[COURSE]` part
+  of the title. You can check it off and add notes, reminders and a color. The name and due date keep syncing from
+  Canvas. Anything already past due when you turn this on starts out completed.
+- **Show as events and list them in Assignments:** they stay calendar events but also appear on the Assignments tab
+  so you can check them off.
+- **Show as events:** a normal calendar.
+
+You can change this later from the ⋮ menu next to the calendar.
 
 ### Google Calendar
 

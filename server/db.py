@@ -129,8 +129,16 @@ CREATE INDEX IF NOT EXISTS idx_cards_list ON cards(list_id);
 
 # Columns added after the first release; created on startup if an older database lacks them.
 MIGRATIONS = [
+    # 0 = normal calendar, 1 = also list its events on the Assignments tab, 2 = turn its events into assignments
     ("calendars", "assignments", "INTEGER NOT NULL DEFAULT 0"),
+    # assignments created from a feed calendar (e.g. Canvas) remember where they came from
+    ("tasks", "source_calendar_id", "INTEGER REFERENCES calendars(id) ON DELETE CASCADE"),
+    ("tasks", "source_key", "TEXT"),
+    ("tasks", "url", "TEXT"),
 ]
+POST_MIGRATION = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_source ON tasks(source_calendar_id, source_key);
+"""
 
 _lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
@@ -148,6 +156,7 @@ def connect() -> sqlite3.Connection:
             cols = {r["name"] for r in _conn.execute(f"PRAGMA table_info({table})")}
             if column not in cols:
                 _conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        _conn.executescript(POST_MIGRATION)
     return _conn
 
 

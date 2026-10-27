@@ -1,5 +1,5 @@
 // Service worker: offline app shell, cached API reads, and push notifications.
-const VERSION = "v5";
+const VERSION = "v6";
 const SHELL = `shell-${VERSION}`;
 const DATA = `data-${VERSION}`;
 const SHELL_FILES = ["/", "/styles.css", "/app.js", "/manifest.webmanifest", "/icons/icon.svg",
