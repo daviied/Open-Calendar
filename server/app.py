@@ -181,6 +181,21 @@ async def change_password(request: Request):
     return {"ok": True}
 
 
+@app.get("/api/connection")
+async def connection_info(request: Request):
+    """What the server sees about this request - for the Settings → Connection check."""
+    h = request.headers
+    return {
+        "scheme_seen_by_app": request.url.scheme,
+        "host": h.get("host"),
+        "x_forwarded_proto": h.get("x-forwarded-proto"),
+        "x_forwarded_host": h.get("x-forwarded-host"),
+        "forwarded": h.get("forwarded"),
+        "base_url_setting": config.BASE_URL,
+        "cookie_secure": request.url.scheme == "https",
+    }
+
+
 @app.post("/api/settings")
 async def save_settings(request: Request):
     body = await request.json()

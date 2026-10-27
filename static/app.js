@@ -1245,7 +1245,7 @@ function settingsDialog(tab = "general") {
   const m = openModal(`<div class="modal-head"><h2>Settings</h2><button class="icon-btn" data-x>${icon("close")}</button></div>
     <div class="modal-body">
       <div class="tabs"><button data-tab="general">General</button><button data-tab="notify">Notifications</button>
-        <button data-tab="sync">Sync</button><button data-tab="app">Install</button><button data-tab="account">Account</button></div>
+        <button data-tab="sync">Sync</button><button data-tab="app">Install</button><button data-tab="account">Account</button><button data-tab="conn">Connection</button></div>
       <div id="setBody"></div></div>`, { wide: true });
   $("[data-x]", m).onclick = closeModal;
   const show = async (t) => {
@@ -1303,6 +1303,37 @@ function settingsDialog(tab = "general") {
         e.target.disabled = false; e.target.textContent = "Sync everything now";
       };
       $("#copyIcs", m).onclick = () => navigator.clipboard?.writeText(state.me.ics_url).then(() => toast("Copied"), () => toast("Copy failed"));
+    } else if (t === "conn") {
+      body.innerHTML = `<div class="settings-section"><p class="muted">Checking…</p></div>`;
+      const report = await connectionReport();
+      const row = (k, v, bad) => `<div class="conn-row${bad ? " bad" : ""}"><span>${esc(k)}</span><b>${esc(String(v ?? "-"))}</b></div>`;
+      const pageHttps = report.page.protocol === "https:";
+      const insecure = pageHttps ? report.resources.filter((r) => !/^(https|data|blob):/.test(r.url)) : [];
+      body.innerHTML = `<div class="settings-section"><h3>This page</h3>
+          ${row("Address", report.page.protocol, report.page.protocol !== "https:")}
+          ${row("Secure context", report.page.secureContext ? "yes" : "no", !report.page.secureContext)}
+          ${row("Opened as", report.page.displayMode)}
+          ${row("Service worker", report.page.serviceWorker)}
+          ${row("App version", report.page.swVersion)}
+        </div>
+        <div class="settings-section"><h3>What the server sees</h3>
+          ${report.server.error ? row("Error", report.server.error, true) : `
+          ${row("Request arrived as", report.server.scheme_seen_by_app, report.page.protocol === "https:" && report.server.scheme_seen_by_app !== "https")}
+          ${row("Proxy says (X-Forwarded-Proto)", report.server.x_forwarded_proto)}
+          ${row("Host", report.server.host)}
+          ${row("CAL_BASE_URL", report.server.base_url_setting, report.page.protocol === "https:" && !String(report.server.base_url_setting).startsWith("https:"))}`}
+        </div>
+        <div class="settings-section"><h3>Loaded by this page (${report.resources.length})</h3>
+          <p>${!pageHttps ? `<b class="error">This page was opened over plain http://, so nothing on it is encrypted.</b>`
+            : insecure.length ? `<b class="error">${insecure.length} insecure item${insecure.length > 1 ? "s" : ""}</b> (marked in red)` : "✅ Everything loaded over HTTPS"}</p>
+          <div class="conn-list">${report.resources.map((r) => `<div class="${insecure.includes(r) ? "bad" : ""}">
+            <span class="code">${esc(r.type)}</span> ${esc(r.url)}</div>`).join("")}</div>
+          ${report.violations.length ? `<p class="error">Blocked by browser:</p><div class="conn-list">${report.violations.map((v) => `<div class="bad">${esc(v)}</div>`).join("")}</div>` : ""}
+          <div class="row" style="margin-top:10px"><button class="btn outline" id="connCopy">Copy report</button>
+            <button class="btn text" id="connAgain">Check again</button></div></div>`;
+      $("#connCopy", m).onclick = () => navigator.clipboard?.writeText(JSON.stringify(report, null, 2))
+        .then(() => toast("Report copied"), () => toast("Copy failed - take a screenshot instead"));
+      $("#connAgain", m).onclick = () => show("conn");
     } else if (t === "app") {
       const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
       body.innerHTML = `<div class="settings-section"><h3>Install as an app</h3>
@@ -1327,6 +1358,50 @@ function settingsDialog(tab = "general") {
   };
   $(".tabs", m).onclick = (e) => { const t = e.target.closest("[data-tab]")?.dataset.tab; if (t) show(t); };
   show(tab);
+}
+
+// ------------------------------------------------------------------ connection check
+
+// Keep every resource the page loads (the browser's default buffer is small) and any URL the
+// browser blocks, so Settings → Connection can show them.
+try { performance.setResourceTimingBufferSize(2000); } catch {}
+const blockedRequests = [];
+document.addEventListener("securitypolicyviolation", (e) => blockedRequests.push(`${e.blockedURI} (${e.violatedDirective})`));
+
+async function swVersion() {
+  const ctl = navigator.serviceWorker?.controller;
+  if (!ctl) return "not controlling this page";
+  return new Promise((resolve) => {
+    const ch = new MessageChannel();
+    ch.port1.onmessage = (e) => resolve(e.data?.version || "unknown");
+    ctl.postMessage({ type: "version" }, [ch.port2]);
+    setTimeout(() => resolve("no answer (old version)"), 1500);
+  });
+}
+
+async function connectionReport() {
+  const seen = new Map();
+  const add = (url, type) => { if (url && !seen.has(url)) seen.set(url, { url, type }); };
+  const nav = performance.getEntriesByType("navigation")[0];
+  add(nav?.name || location.href, "page");
+  for (const e of performance.getEntriesByType("resource")) add(e.name.split("?")[0], e.initiatorType);
+  for (const el of document.querySelectorAll("link[href], script[src], img[src], iframe[src], source[src], video[src], audio[src]")) {
+    add(el.href || el.src, el.tagName.toLowerCase());
+  }
+  for (const f of document.forms) if (f.getAttribute("action")) add(f.action, "form");
+  const reg = await navigator.serviceWorker?.getRegistration().catch(() => null);
+  let server;
+  try { server = await api("/api/connection"); } catch (e) { server = { error: e.message }; }
+  return {
+    page: {
+      url: location.origin, protocol: location.protocol, secureContext: window.isSecureContext,
+      displayMode: matchMedia("(display-mode: standalone)").matches || navigator.standalone ? "installed app" : "browser tab",
+      serviceWorker: reg?.active?.scriptURL || "none", swVersion: await swVersion(), userAgent: navigator.userAgent,
+    },
+    server,
+    resources: [...seen.values()],
+    violations: blockedRequests,
+  };
 }
 
 // ------------------------------------------------------------------ push

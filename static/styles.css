@@ -304,6 +304,11 @@ textarea { resize: vertical; min-height: 80px; }
 .settings-section h3 { font-size: 15px; font-weight: 500; margin: 8px 0; }
 .settings-section p { margin: 6px 0; }
 .code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; background: var(--surface-2); padding: 2px 6px; border-radius: 4px; word-break: break-all; }
+.conn-row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
+.conn-row span { color: var(--text-2); }
+.conn-row b { font-weight: 500; text-align: right; word-break: break-all; }
+.conn-row.bad b, .conn-list .bad { color: var(--danger); font-weight: 600; }
+.conn-list { font-size: 12px; display: flex; flex-direction: column; gap: 4px; word-break: break-all; }
 .acct { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
 .acct .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .help { font-size: 13px; color: var(--text-2); background: var(--bg-soft); border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }

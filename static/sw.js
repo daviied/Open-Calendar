@@ -1,5 +1,5 @@
 // Service worker: offline app shell, cached API reads, and push notifications.
-const VERSION = "v2";
+const VERSION = "v3";
 const SHELL = `shell-${VERSION}`;
 const DATA = `data-${VERSION}`;
 const SHELL_FILES = ["/", "/styles.css", "/app.js", "/manifest.webmanifest", "/icons/icon.svg",
@@ -45,6 +45,10 @@ self.addEventListener("fetch", (event) => {
   }
   if (url.pathname.startsWith("/ics/")) return;
   event.respondWith(networkFirst(req, SHELL, false));
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "version") event.ports[0]?.postMessage({ version: VERSION });
 });
 
 self.addEventListener("push", (event) => {
