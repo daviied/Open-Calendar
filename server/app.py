@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from icalendar import Calendar as ICal, Event as IEvent, vRecur
 from itsdangerous import BadSignature, SignatureExpired, TimestampSigner
 
-from . import config, db, push, sync
+from . import config, db, push, sync, tasks
 from .events import (UTC, add_exdate, clean_payload, expand_event, fmt_utc, get_zone, insert_event,
                      list_occurrences, parse_date, parse_dt, remaining_rrule, shift_exdates,
                      truncate_series, update_event)
@@ -212,7 +212,7 @@ def _calendar_out(c: dict, accounts: dict) -> dict:
         "id": c["id"], "name": c["name"], "color": c["color"], "source": c["source"],
         "url": c["url"], "visible": bool(c["visible"]), "read_only": bool(c["read_only"]),
         "default_reminders": json.loads(c["default_reminders"]),
-        "last_synced": c["last_synced"], "sync_error": c["sync_error"],
+        "last_synced": c["last_synced"], "sync_error": c["sync_error"], "assignments": bool(c["assignments"]),
         "account_id": c["account_id"], "account_email": acc["email"] if acc else None,
     }
 
@@ -236,8 +236,8 @@ async def create_calendar(request: Request):
         url = (body.get("url") or "").strip()
         if not url.lower().startswith(("http://", "https://", "webcal://")):
             raise HTTPException(400, "Enter a valid calendar feed URL")
-        cid = db.execute("INSERT INTO calendars(name, color, source, url, read_only) VALUES(?,?,?,?,1)",
-                         (name, color, "ics", url))
+        cid = db.execute("INSERT INTO calendars(name, color, source, url, read_only, assignments) VALUES(?,?,?,?,1,?)",
+                         (name, color, "ics", url, 1 if body.get("assignments") else 0))
         await sync.sync_calendar(cid)
     else:
         cid = db.execute("INSERT INTO calendars(name, color, source) VALUES(?,?,'local')", (name, color))
@@ -259,6 +259,8 @@ async def edit_calendar(cal_id: int, request: Request):
         fields["visible"] = 1 if body["visible"] else 0
     if "default_reminders" in body:
         fields["default_reminders"] = json.dumps(sorted({int(m) for m in body["default_reminders"]}))
+    if "assignments" in body:
+        fields["assignments"] = 1 if body["assignments"] else 0
     if "url" in body and cal["source"] == "ics":
         fields["url"] = str(body["url"]).strip()
     if fields:
@@ -346,7 +348,9 @@ def _range(request: Request) -> tuple[datetime, datetime]:
 @app.get("/api/events")
 async def get_events(request: Request):
     start, end = _range(request)
-    return {"events": list_occurrences(start, end)}
+    items = list_occurrences(start, end) + tasks.calendar_items(start, end)
+    items.sort(key=lambda o: (o["start"], not o["all_day"]))
+    return {"events": items}
 
 
 @app.get("/api/search")
@@ -568,6 +572,9 @@ async def ics_export(token: str):
 async def service_worker():
     return FileResponse(STATIC / "sw.js", media_type="application/javascript",
                         headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
+
+
+app.include_router(tasks.router)
 
 
 @app.get("/favicon.ico")

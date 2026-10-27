@@ -28,9 +28,14 @@ const icon = (name) => `<svg viewBox="0 0 24 24">${ICONS[name]}</svg>`;
 
 // ------------------------------------------------------------------ state
 
-const prefs = Object.assign({ weekStart: 0, hour24: false, view: null }, readJSON("cal.prefs"));
+const prefs = Object.assign({ weekStart: 0, hour24: false, view: null, mode: "calendar", showTasks: true, showCards: true,
+                              boardId: null, taskFilter: "todo" }, readJSON("cal.prefs"));
 const state = {
   me: null,
+  mode: ["calendar", "tasks", "boards"].includes(prefs.mode) ? prefs.mode : "calendar",
+  assignments: null,   // { tasks, feed } from /api/assignments
+  boards: null,        // board list
+  board: null,         // the open board with its lists and cards
   view: prefs.view || (isMobile() ? "3day" : "week"),
   date: startOfDay(new Date()),
   miniDate: startOfDay(new Date()),
@@ -77,6 +82,10 @@ function dayDiff(a, b) { return Math.round((startOfDay(b) - startOfDay(a)) / 864
 function evStart(ev) { return ev.all_day ? parseYMD(ev.start) : new Date(ev.start); }
 function evEnd(ev) { return ev.all_day ? parseYMD(ev.end) : new Date(ev.end); }
 function isLong(ev) { return ev.all_day || evEnd(ev) - evStart(ev) >= 86400000; }
+// Assignments, board cards and events from calendars shown as assignments (e.g. Canvas) get a check circle.
+function isTaskLike(ev) { return ev.kind === "task" || ev.kind === "card" || !!ev.assignment; }
+function taskClass(ev) { return (isTaskLike(ev) ? " task" : "") + (ev.done ? " done" : ""); }
+function dueOf(ev) { return ev.due ? (ev.all_day ? parseYMD(ev.due) : new Date(ev.due)) : evStart(ev); }
 
 function fmtTime(d, compact = true) {
   if (prefs.hour24) return hm(d);
@@ -223,8 +232,13 @@ async function start() {
   await loadCalendars();
   handleUrl();
   await refresh();
+  if (state.mode !== "tasks") loadTaskBadge();
   if ("Notification" in window && Notification.permission === "granted") ensurePushSubscription(false).catch(() => {});
-  setInterval(() => { if (document.visibilityState === "visible") refresh(true); }, 5 * 60 * 1000);
+  setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    refresh(true);
+    if (state.mode !== "tasks") loadTaskBadge();
+  }, 5 * 60 * 1000);
   setInterval(updateNowLine, 60 * 1000);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(true); });
 }
@@ -237,6 +251,7 @@ function handleUrl() {
     const s = q.get("start");
     state.date = startOfDay(s.length === 10 ? parseYMD(s) : new Date(s));
     state.pendingEvent = q.get("event");
+    state.mode = "calendar";
   }
   if (q.get("new")) setTimeout(() => openEditor(null), 300);
   if (q.toString()) history.replaceState(null, "", "/");
@@ -272,12 +287,14 @@ function visibleRange() {
 let loadToken = 0;
 async function refresh(quiet = false) {
   const token = ++loadToken;
+  if (state.mode === "tasks") return refreshTasks(token, quiet);
+  if (state.mode === "boards") return refreshBoards(token, quiet);
   const [s, e] = visibleRange();
   if (!quiet) render();
   try {
     const data = await api(`/api/events?start=${encodeURIComponent(s.toISOString())}&end=${encodeURIComponent(e.toISOString())}`);
     if (token !== loadToken) return;
-    state.events = data.events;
+    state.events = data.events.filter((x) => x.kind === "event" || (x.kind === "task" ? prefs.showTasks : prefs.showCards));
   } catch (err) {
     if (token !== loadToken) return;
     if (err.message !== "Not signed in") toast("Couldn't load events: " + err.message);
@@ -298,7 +315,16 @@ function go(delta) {
   state.miniDate = state.date;
   refresh();
 }
+function setMode(m) {
+  state.mode = m;
+  prefs.mode = m; savePrefs();
+  state.search = null;
+  $("#app").classList.remove("sidebar-open");
+  setMiniDrop(false);
+  refresh();
+}
 function setView(v) {
+  state.mode = "calendar"; prefs.mode = "calendar";
   state.view = v;
   prefs.view = v; savePrefs();
   $("#viewSelect").value = v;
@@ -306,6 +332,7 @@ function setView(v) {
   refresh();
 }
 function gotoDate(d, view) {
+  if (state.mode !== "calendar") { state.mode = "calendar"; prefs.mode = "calendar"; savePrefs(); }
   state.date = startOfDay(d);
   state.miniDate = state.date;
   if (view) { state.view = view; $("#viewSelect").value = view; }
@@ -317,10 +344,14 @@ function gotoDate(d, view) {
 
 function render() {
   closePopover();
+  $("#app").dataset.mode = state.mode;
+  $$("[data-mode]").forEach((b) => { if (b.tagName === "BUTTON") b.classList.toggle("on", b.dataset.mode === state.mode); });
   $("#viewSelect").value = state.view;
   renderTitle();
   renderMini();
   const main = $("#main");
+  if (state.mode === "tasks") return renderTasks(main);
+  if (state.mode === "boards") return renderBoards(main);
   if (state.search) return renderSearch(main);
   if (state.view === "month") renderMonth(main);
   else if (state.view === "schedule") renderSchedule(main);
@@ -331,7 +362,9 @@ function renderTitle() {
   const d = state.date;
   const mon = isMobile() ? "short" : "long";
   let t;
-  if (state.search) t = "Search";
+  if (state.mode === "tasks") t = "Assignments";
+  else if (state.mode === "boards") t = state.board && prefs.boardId ? state.board.board.name : "Boards";
+  else if (state.search) t = "Search";
   else if (isMobile()) {
     const ref = state.view === "month" || state.view === "schedule" ? d : visibleRange()[0];
     t = fmtDate(ref, { month: "long", ...(ref.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) });
@@ -391,7 +424,9 @@ function renderCalendarList() {
       </label>
       <button class="icon-btn small more" data-calmenu="${c.id}" aria-label="Options for ${esc(c.name)}">${icon("more")}</button>
     </li>`;
-  $("#myCals").innerHTML = mine.map(item).join("");
+  const kindToggle = (kind, label, on) => `<li><label><input type="checkbox" class="check" style="--c:#8e24aa" data-toggle-kind="${kind}" ${on ? "checked" : ""}>
+      <span class="name">${label}</span></label></li>`;
+  $("#myCals").innerHTML = mine.map(item).join("") + kindToggle("task", "Assignments", prefs.showTasks) + kindToggle("card", "Board cards", prefs.showCards);
   $("#otherCals").innerHTML = other.map(item).join("") ||
     `<li class="muted" style="font-size:12px;padding:4px 8px">Add Google, Outlook or Canvas with the + button.</li>`;
 }
@@ -508,8 +543,9 @@ function barHtml(it, n, lane, laneH, top, now) {
   const past = evEnd(ev) < now ? " past" : "";
   const timedDot = !ev.all_day && !isLong(ev);
   const left = (it.s / n) * 100, width = ((it.e - it.s + 1) / n) * 100;
-  const label = timedDot ? `<span class="tm">${fmtTime(evStart(ev))}</span> ${esc(ev.title)}` : `${it.cutL ? "◂ " : ""}${esc(ev.title)}`;
-  return `<div class="bar${timedDot ? " timed" : ""}${past}" data-ev="${esc(ev.id)}" style="${colorVars(ev.color)};left:${left}%;width:calc(${width}% - 4px);top:${top + lane * laneH}px">${label}</div>`;
+  const tick = isTaskLike(ev) ? '<i class="tick-i"></i>' : "";
+  const label = timedDot ? `<span class="tm">${fmtTime(dueOf(ev))}</span> ${tick}${esc(ev.title)}` : `${it.cutL ? "◂ " : ""}${tick}${esc(ev.title)}`;
+  return `<div class="bar${timedDot ? " timed" : ""}${past}${taskClass(ev)}" data-ev="${esc(ev.id)}" style="${colorVars(ev.color)};left:${left}%;width:calc(${width}% - 4px);top:${top + lane * laneH}px">${label}</div>`;
 }
 
 function layoutDay(day, events, hour, now) {
@@ -550,12 +586,12 @@ function layoutDay(day, events, hour, now) {
     const ev = sg.ev;
     const short = height < 38;
     const s = evStart(ev), e = evEnd(ev);
-    const time = `${fmtTime(s)} – ${fmtTime(e)}`;
+    const time = isTaskLike(ev) ? `Due ${fmtTime(dueOf(ev))}` : `${fmtTime(s)} – ${fmtTime(e)}`;
     const past = e < now ? " past" : "";
     const span = sg.ncols > 1 && sg.col < sg.ncols - 1 ? width * 1.6 : width;
-    out.push(`<div class="ev${short ? " short" : ""}${past}" data-ev="${esc(ev.id)}" style="${colorVars(ev.color)};top:${top}px;height:${height}px;left:${left}%;width:calc(${Math.min(span, 100 - left)}% - 2px);z-index:${2 + sg.col}">
-      <div class="t">${esc(ev.title)}${short ? "," : ""}</div><div class="s">${time}${!short && ev.location ? `<br>${esc(ev.location)}` : ""}</div>
-      ${ev.read_only ? "" : '<div class="resize"></div>'}</div>`);
+    out.push(`<div class="ev${short ? " short" : ""}${past}${taskClass(ev)}" data-ev="${esc(ev.id)}" style="${colorVars(ev.color)};top:${top}px;height:${height}px;left:${left}%;width:calc(${Math.min(span, 100 - left)}% - 2px);z-index:${2 + sg.col}">
+      <div class="t">${isTaskLike(ev) ? '<i class="tick-i"></i>' : ""}${esc(ev.title)}${short ? "," : ""}</div><div class="s">${time}${!short && ev.location ? `<br>${esc(ev.location)}` : ""}</div>
+      ${ev.read_only || ev.kind !== "event" ? "" : '<div class="resize"></div>'}</div>`);
   }
   return out;
 }
@@ -645,8 +681,8 @@ function scheduleHtml(events, emptyText) {
     return `<div class="sched-day ${sameDay(d, today) ? "today" : ""}">
       <div class="sched-date" data-goto="${k}"><span class="num">${d.getDate()}</span>
         <span class="meta">${d.toLocaleDateString(undefined, { month: "short", weekday: "short", ...(d.getFullYear() !== today.getFullYear() ? { year: "numeric" } : {}) })}</span></div>
-      <div class="sched-events">${list.map((ev) => `<div class="sched-ev" data-ev="${esc(ev.id)}" style="${colorVars(ev.color)}">
-          <span class="dot"></span><span class="time">${ev.all_day || isLong(ev) ? "All day" : `${fmtTime(evStart(ev))} – ${fmtTime(evEnd(ev))}`}</span>
+      <div class="sched-events">${list.map((ev) => `<div class="sched-ev${taskClass(ev)}" data-ev="${esc(ev.id)}" style="${colorVars(ev.color)}">
+          <span class="dot"></span><span class="time">${isTaskLike(ev) ? (ev.all_day ? "Due today" : `Due ${fmtTime(dueOf(ev))}`) : ev.all_day || isLong(ev) ? "All day" : `${fmtTime(evStart(ev))} – ${fmtTime(evEnd(ev))}`}</span>
           <span class="ttl">${esc(ev.title)}${ev.location ? `<span class="muted"> · ${esc(ev.location)}</span>` : ""}</span></div>`).join("")}</div>
     </div>`;
   }).join("");
@@ -683,26 +719,44 @@ function openPopover(ev, anchor) {
   const cal = calById(ev.calendar_id);
   const rem = ev.effective_reminders || [];
   const desc = stripHtml(ev.description || "");
+  const taskLike = isTaskLike(ev);
+  const where = ev.kind === "task" ? (ev.course || "Assignment") : ev.kind === "card" ? `${ev.board_name} · ${ev.list_name}` : null;
   pop.innerHTML = `<div class="pop-actions">
       ${ev.read_only ? "" : `<button class="icon-btn" data-act="edit" title="Edit">${icon("edit")}</button>
       <button class="icon-btn" data-act="delete" title="Delete">${icon("trash")}</button>`}
       <button class="icon-btn" data-act="close" title="Close">${icon("close")}</button></div>
     <div class="pop-row"><span class="sw" style="--c:${esc(ev.color)}"></span><div>
-      <div class="pop-title">${esc(ev.title)}</div><div class="muted">${esc(fmtEventWhen(ev))}</div>
+      <div class="pop-title"${ev.done ? ' style="text-decoration:line-through"' : ""}>${esc(ev.title)}</div>
+      <div class="muted">${esc(taskLike ? fmtDue(ev) : fmtEventWhen(ev))}</div>
+      ${taskLike ? `<div class="row" style="margin-top:10px">
+        <button class="btn ${ev.done ? "outline" : "primary"}" data-act="toggle">${ev.done ? "Mark not done" : "Mark complete"}</button>
+        ${ev.kind === "card" ? `<button class="btn text" data-act="board">Open board</button>` : ""}</div>` : ""}
       ${ev.recurring ? `<div class="muted">${esc(describeRRule(ev.rrule, parseYMD(ev.series_start.slice(0, 10))))}</div>` : ""}</div></div>
     ${ev.location ? `<div class="pop-row">${icon("place")}<div>${/^https?:/.test(ev.location) ? linkify(ev.location) :
       `<a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(ev.location)}" target="_blank" rel="noopener">${esc(ev.location)}</a>`}</div></div>` : ""}
     ${desc.trim() ? `<div class="pop-row">${icon("notes")}<div class="pop-desc">${linkify(desc.trim())}</div></div>` : ""}
     ${ev.url ? `<div class="pop-row">${icon("link")}<div><a href="${esc(ev.url)}" target="_blank" rel="noopener">Open in ${esc(sourceName(cal))}</a></div></div>` : ""}
     ${rem.length ? `<div class="pop-row">${icon("bell")}<div>${rem.map((m) => esc(fmtMinutes(m))).join("<br>")}</div></div>` : ""}
-    <div class="pop-row">${icon("cal")}<div>${esc(cal?.name || "")}${cal?.account_email ? `<div class="muted">${esc(cal.account_email)}</div>` : ""}</div></div>`;
+    <div class="pop-row">${icon("cal")}<div>${esc(where ?? cal?.name ?? "")}${!where && cal?.account_email ? `<div class="muted">${esc(cal.account_email)}</div>` : ""}</div></div>`;
   pop.hidden = false;
   pushOverlay();
   pop.onclick = async (e) => {
     const act = e.target.closest("[data-act]")?.dataset.act;
     if (act === "close") closePopover();
-    if (act === "edit") { closePopover(); openEditor(ev); }
-    if (act === "delete") { closePopover(); deleteEvent(ev); }
+    if (act === "toggle") { closePopover(); toggleDone(ev); }
+    if (act === "board") { closePopover(); prefs.boardId = ev.board_id; savePrefs(); setMode("boards"); }
+    if (act === "edit") {
+      closePopover();
+      if (ev.kind === "task") openTaskEditor(taskFromItem(ev));
+      else if (ev.kind === "card") openCardById(ev.board_id, ev.card_id);
+      else openEditor(ev);
+    }
+    if (act === "delete") {
+      closePopover();
+      if (ev.kind === "task") deleteTask(ev.task_id);
+      else if (ev.kind === "card") deleteCard(ev.card_id);
+      else deleteEvent(ev);
+    }
   };
   // position
   const r = anchor?.getBoundingClientRect();
@@ -1042,7 +1096,7 @@ function bindGrid(main) {
     const evEl = e.target.closest(".ev");
     if (evEl) {
       const ev = findEvent(evEl.dataset.ev);
-      if (!ev || ev.read_only || e.pointerType === "touch") return;
+      if (!ev || ev.read_only || ev.kind !== "event" || e.pointerType === "touch") return;
       drag = { type: e.target.classList.contains("resize") ? "resize" : "move", ev, el: evEl, x0: e.clientX, y0: e.clientY,
                col0: col, startMin: minutesAt(col, e.clientY, 15), moved: false };
     } else if (e.pointerType !== "touch") {
@@ -1112,6 +1166,9 @@ function calendarDialog(cal) {
       <div class="field"><span>Default notifications (minutes before; comma separated, blank for none)</span>
         <input type="text" id="cRem" value="${esc((cal.default_reminders || []).join(", "))}"></div>
       ${cal.source === "ics" ? `<div class="field"><span>Feed URL</span><input type="url" id="cUrl" value="${esc(cal.url || "")}"></div>` : ""}
+      <label class="toggle" style="margin:8px 0"><input type="checkbox" id="cAssign" ${cal.assignments ? "checked" : ""}>
+        Show in Assignments</label>
+      <p class="muted" style="font-size:12px;margin:0 0 8px">Lists this calendar's events on the Assignments tab so you can check them off - handy for Canvas.</p>
       ${cal.source !== "local" ? `<p class="muted">Source: ${esc({ ics: "Subscribed feed (read-only)", google: "Google Calendar", microsoft: "Outlook / Microsoft 365" }[cal.source])}
         ${cal.account_email ? " · " + esc(cal.account_email) : ""}<br>Last synced: ${cal.last_synced ? new Date(cal.last_synced * 1000).toLocaleString() : "never"}</p>` : ""}
       ${cal.sync_error ? `<p class="error">Sync error: ${esc(cal.sync_error)}</p>` : ""}
@@ -1128,7 +1185,7 @@ function calendarDialog(cal) {
   };
   $("[data-x]", m).onclick = closeModal;
   $("[data-save]", m).onclick = async () => {
-    const body = { name: $("#cName", m).value, color,
+    const body = { name: $("#cName", m).value, color, assignments: $("#cAssign", m).checked,
       default_reminders: $("#cRem", m).value.split(",").map((x) => x.trim()).filter(Boolean).map(Number).filter((n) => n >= 0) };
     if ($("#cUrl", m)) body.url = $("#cUrl", m).value;
     try { await api(`/api/calendars/${cal.id}`, { method: "PATCH", body }); closeModal(); await loadCalendars(); refresh(true); }
@@ -1184,6 +1241,7 @@ function addCalendarDialog(tab = "new") {
         <div class="field"><span>Calendar URL</span><input type="url" id="fUrl" placeholder="https://… or webcal://…"></div>
         <div class="row"><div class="field grow"><span>Name</span><input type="text" id="fName" value="Canvas"></div>
           <div class="field"><span>Color</span><div class="colors" id="fColor">${COLORS.map((c, i) => `<button type="button" style="--c:${c}" data-color="${c}" class="${i === 2 ? "on" : ""}"></button>`).join("")}</div></div></div>
+        <label class="toggle" style="margin:4px 0"><input type="checkbox" id="fAssign" checked> Show in Assignments (check items off as you finish them)</label>
         <p class="error" id="fErr" hidden></p>
         <div class="modal-foot" style="padding:12px 0 8px"><button class="btn primary" id="fSave">Subscribe</button></div>`;
       let color = COLORS[2];
@@ -1192,12 +1250,14 @@ function addCalendarDialog(tab = "new") {
         $$("#feedKind .chip", m).forEach((c) => c.classList.toggle("on", c.dataset.k === k));
         $("#feedHelp", m).innerHTML = FEED_HELP[k];
         $("#fName", m).value = { canvas: "Canvas", outlook: "Outlook", google: "Google", other: "" }[k];
+        $("#fAssign", m).checked = k === "canvas";
       };
       $("#fColor", m).onclick = (e) => { const b = e.target.closest("[data-color]"); if (!b) return; color = b.dataset.color; $$("#fColor button", m).forEach((x) => x.classList.toggle("on", x === b)); };
       $("#fSave", m).onclick = async (e) => {
         e.target.disabled = true; e.target.textContent = "Subscribing…";
         try {
-          await api("/api/calendars", { method: "POST", body: { type: "ics", url: $("#fUrl", m).value, name: $("#fName", m).value || "Subscribed", color } });
+          await api("/api/calendars", { method: "POST", body: { type: "ics", url: $("#fUrl", m).value, name: $("#fName", m).value || "Subscribed", color,
+            assignments: $("#fAssign", m).checked } });
           closeModal(); await loadCalendars(); refresh(true);
           const bad = state.calendars.filter((c) => c.source === "ics" && c.sync_error).pop();
           if (bad) toast(`Subscribed, but sync failed: ${bad.sync_error}`); else toast("Subscribed");
@@ -1360,6 +1420,618 @@ function settingsDialog(tab = "general") {
   show(tab);
 }
 
+// ------------------------------------------------------------------ small shared dialogs
+
+function promptDialog(title, value = "", placeholder = "") {
+  return new Promise((resolve) => {
+    const m = openModal(`<form id="promptForm"><div class="modal-head"><h2>${esc(title)}</h2></div>
+      <div class="modal-body"><input type="text" name="v" value="${esc(value)}" placeholder="${esc(placeholder)}" style="width:100%" autocomplete="off"></div>
+      <div class="modal-foot"><button type="button" class="btn text" data-x>Cancel</button><button class="btn primary">Save</button></div></form>`);
+    const f = $("#promptForm", m);
+    setTimeout(() => { f.v.focus(); f.v.select(); }, 50);
+    $("[data-x]", m).onclick = () => { closeModal(); resolve(null); };
+    f.onsubmit = (e) => { e.preventDefault(); const v = f.v.value.trim(); closeModal(); resolve(v || null); };
+  });
+}
+
+function colorPicker(selected, { allowNone = false } = {}) {
+  return `<div class="colors" data-colors>${allowNone ? `<button type="button" class="none ${!selected ? "on" : ""}" data-color="" title="None"></button>` : ""}
+    ${COLORS.map((c) => `<button type="button" style="--c:${c}" data-color="${c}" class="${c === selected ? "on" : ""}"></button>`).join("")}</div>`;
+}
+function bindColorPicker(root, onPick) {
+  const el = $("[data-colors]", root);
+  el.onclick = (e) => {
+    const b = e.target.closest("[data-color]");
+    if (!b) return;
+    $$("button", el).forEach((x) => x.classList.toggle("on", x === b));
+    onPick(b.dataset.color);
+  };
+}
+
+let openMenuEl = null;
+function showMenu(anchor, items) {
+  closeMenu();
+  const el = document.createElement("div");
+  el.className = "menu";
+  el.innerHTML = items.map((it, i) => `<button data-i="${i}" class="${it.danger ? "danger" : ""}">${esc(it.label)}</button>`).join("");
+  document.body.appendChild(el);
+  const r = anchor.getBoundingClientRect();
+  el.style.top = `${Math.min(r.bottom + 4, innerHeight - el.offsetHeight - 8)}px`;
+  el.style.left = `${Math.max(8, Math.min(r.right - el.offsetWidth, innerWidth - el.offsetWidth - 8))}px`;
+  el.onclick = (e) => { const i = e.target.closest("[data-i]")?.dataset.i; if (i != null) { closeMenu(); items[i].run(); } };
+  openMenuEl = el;
+  setTimeout(() => document.addEventListener("pointerdown", menuOutside, true), 0);
+}
+function menuOutside(e) { if (openMenuEl && !openMenuEl.contains(e.target)) closeMenu(); }
+function closeMenu() {
+  openMenuEl?.remove();
+  openMenuEl = null;
+  document.removeEventListener("pointerdown", menuOutside, true);
+}
+
+// Due date + optional time fields, shared by the assignment and card editors.
+function dueFields(due, allDay) {
+  const d = due ? (allDay ? parseYMD(due) : new Date(due)) : null;
+  return `<div class="when-row" style="grid-template-columns:56px 1fr 120px"><span>Due</span>
+    <input type="date" name="dueDate" value="${d ? ymd(d) : ""}">
+    <input type="time" name="dueTime" value="${d && !allDay ? hm(d) : ""}" step="300"></div>
+    <p class="muted" style="font-size:12px;margin:4px 0 0">Leave the time empty for "due that day"; clear the date for no due date.</p>`;
+}
+function readDue(f) {
+  if (!f.dueDate.value) return { due: null, all_day: false };
+  if (!f.dueTime.value) return { due: f.dueDate.value, all_day: true };
+  return { due: new Date(`${f.dueDate.value}T${f.dueTime.value}`).toISOString(), all_day: false };
+}
+
+async function toggleDone(item) {
+  const done = !item.done;
+  try {
+    if (item.kind === "task") await api(`/api/tasks/${item.task_id}`, { method: "PATCH", body: { done } });
+    else if (item.kind === "card") await api(`/api/cards/${item.card_id}`, { method: "PATCH", body: { done } });
+    else await api("/api/event-done", { method: "POST", body: { calendar_id: item.calendar_id, key: item.done_key, done } });
+    toast(done ? "Marked complete" : "Marked not done", { label: "Undo", run: () => toggleDone({ ...item, done }) });
+    await refresh(true);
+    loadTaskBadge();
+  } catch (e) { toast(e.message); }
+}
+
+// ------------------------------------------------------------------ assignments
+
+const TASK_REMINDERS = [[0, "At due time"], [60, "1 hour before"], [1440, "1 day before"], [2880, "2 days before"], [10080, "1 week before"]];
+const GROUPS = [["overdue", "Overdue"], ["today", "Today"], ["tomorrow", "Tomorrow"], ["week", "This week"], ["later", "Later"], ["none", "No due date"]];
+
+function fmtDue(item) {
+  if (!item.due) return "No due date";
+  const d = dueOf(item);
+  const day = fmtDate(d, { weekday: "short", month: "short", day: "numeric", ...(d.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) });
+  return item.all_day ? `Due ${day}` : `Due ${day}, ${fmtTime(d, false)}`;
+}
+// End of the day for date-only deadlines; the exact time otherwise.
+function deadline(item) { const d = dueOf(item); return item.all_day ? addDays(d, 1) : d; }
+function groupOf(item) {
+  if (!item.due) return "none";
+  const now = new Date();
+  if (deadline(item) <= now) return "overdue";
+  const days = dayDiff(now, dueOf(item));
+  return days <= 0 ? "today" : days === 1 ? "tomorrow" : days < 7 ? "week" : "later";
+}
+function relDue(item) {
+  if (!item.due || item.done) return "";
+  const now = new Date();
+  if (deadline(item) <= now) {
+    const late = dayDiff(dueOf(item), now);
+    return `<span class="late">${late <= 0 ? "Overdue" : `${late} day${late > 1 ? "s" : ""} late`}</span>`;
+  }
+  const days = dayDiff(now, dueOf(item));
+  if (days <= 0) {
+    if (item.all_day) return "today";
+    const h = Math.round((dueOf(item) - now) / 3600000);
+    return h < 1 ? `<span class="late">in ${Math.max(1, Math.round((dueOf(item) - now) / 60000))} min</span>` : `in ${h}h`;
+  }
+  return days === 1 ? "tomorrow" : `in ${days} days`;
+}
+
+function assignmentItems() {
+  const a = state.assignments || { tasks: [], feed: [] };
+  const cutoff = addDays(new Date(), -14);
+  const tasks = a.tasks.map((t) => ({ ...t, kind: "task", task_id: t.id, key: `t:${t.id}` }));
+  // Feeds (Canvas etc.) carry months of history: skip old items unless they're still open and recent.
+  const feed = a.feed.filter((f) => !f.due || deadline(f) >= cutoff || (!f.done && deadline(f) >= addDays(new Date(), -30)))
+    .map((f) => ({ ...f, assignment: true, key: `f:${f.id}`, calendar_name: calById(f.calendar_id)?.name || "" }));
+  return [...tasks, ...feed];
+}
+
+async function loadAssignments() {
+  state.assignments = await api("/api/assignments");
+  updateTaskBadge();
+}
+async function loadTaskBadge() { try { await loadAssignments(); } catch {} }
+function updateTaskBadge() {
+  const n = assignmentItems().filter((i) => !i.done && ["overdue", "today"].includes(groupOf(i))).length;
+  for (const id of ["#taskBadge", "#taskBadgeMobile"]) { const b = $(id); b.hidden = !n; b.textContent = n; }
+}
+
+async function refreshTasks(token, quiet) {
+  if (!quiet || !state.assignments) render();
+  try { await loadAssignments(); } catch (e) { if (e.message !== "Not signed in") toast(e.message); }
+  if (token === loadToken) render();
+}
+
+function taskItemHtml(i) {
+  return `<div class="task-item${i.done ? " done" : ""}" data-item="${esc(i.key)}" style="--c:${esc(i.color || "#8e24aa")}">
+    <button class="tick" data-tick="${esc(i.key)}" aria-label="${i.done ? "Mark not done" : "Mark complete"}">
+      <svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></button>
+    <div class="ti-main"><div class="ti-title">${esc(i.title)}</div>
+      <div class="ti-meta">${i.course ? `<span class="course-chip">${esc(i.course)}</span>` : ""}<span>${esc(fmtDue(i))}</span>
+        ${relDue(i) ? `<span>· ${relDue(i)}</span>` : ""}
+        ${i.kind === "event" ? `<span class="ti-src">from ${esc(i.calendar_name)}</span>` : ""}</div></div></div>`;
+}
+
+function renderTasks(main) {
+  if (!state.assignments) { main.innerHTML = `<div class="tasks-view"><div class="empty-state">Loading…</div></div>`; return; }
+  const items = assignmentItems();
+  const courses = [...new Set(items.map((i) => i.course).filter(Boolean))].sort();
+  if (state.courseFilter && !courses.includes(state.courseFilter)) state.courseFilter = null;
+  const shown = items.filter((i) => (!state.courseFilter || i.course === state.courseFilter));
+  const todo = shown.filter((i) => !i.done), done = shown.filter((i) => i.done);
+  let body;
+  if (prefs.taskFilter === "done") {
+    done.sort((a, b) => (b.done_at || 0) - (a.done_at || 0) || String(b.due).localeCompare(String(a.due)));
+    body = done.length ? `<div class="task-group"><h3>Completed</h3>${done.map(taskItemHtml).join("")}</div>`
+      : `<div class="empty-state"><b>Nothing completed yet</b>Check off an assignment and it shows up here.</div>`;
+  } else {
+    todo.sort((a, b) => (a.due ? deadline(a) : Infinity) - (b.due ? deadline(b) : Infinity));
+    body = GROUPS.map(([g, label]) => {
+      const list = todo.filter((i) => groupOf(i) === g);
+      return list.length ? `<div class="task-group ${g}"><h3>${label} · ${list.length}</h3>${list.map(taskItemHtml).join("")}</div>` : "";
+    }).join("") || `<div class="empty-state"><b>All caught up 🎉</b>Add an assignment above${state.calendars.some((c) => c.assignments) ? "" :
+      ', or turn on "Show in Assignments" for your Canvas calendar (⋮ next to it in the calendar sidebar)'}.</div>`;
+  }
+  main.innerHTML = `<div class="tasks-view"><div class="tasks-inner">
+    <form class="quick-add" id="quickTask" autocomplete="off">
+      <input name="title" placeholder="Add an assignment…" required>
+      <input type="date" name="dueDate" value="${ymd(addDays(new Date(), 1))}" aria-label="Due date">
+      <input type="time" name="dueTime" step="300" aria-label="Due time (optional)">
+      <input name="course" placeholder="Course" list="courseList" style="width:120px" aria-label="Course">
+      <datalist id="courseList">${courses.map((c) => `<option value="${esc(c)}">`).join("")}</datalist>
+      <button class="btn primary">Add</button>
+    </form>
+    <div class="task-filters">
+      <button class="chip ${prefs.taskFilter !== "done" ? "on" : ""}" data-tf="todo">To do · ${todo.length}</button>
+      <button class="chip ${prefs.taskFilter === "done" ? "on" : ""}" data-tf="done">Completed · ${done.length}</button>
+      ${courses.length > 1 ? `<span style="width:8px"></span><button class="chip ${!state.courseFilter ? "on" : ""}" data-course="">All courses</button>
+        ${courses.map((c) => `<button class="chip ${state.courseFilter === c ? "on" : ""}" data-course="${esc(c)}">${esc(c)}</button>`).join("")}` : ""}
+    </div>
+    ${body}</div></div>`;
+
+  const f = $("#quickTask", main);
+  f.course.value = state.courseFilter || prefs.lastCourse || "";
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const due = readDue(f);
+    try {
+      await api("/api/tasks", { method: "POST", body: { title: f.title.value, course: f.course.value, ...due, reminders: prefs.taskReminders ?? [1440] } });
+      prefs.lastCourse = f.course.value; savePrefs();
+      toast("Assignment added");
+      await refresh(true);
+      $("#quickTask [name=title]")?.focus();
+    } catch (ex) { toast(ex.message); }
+  };
+}
+
+function bindTasks(main) {
+  main.addEventListener("click", (e) => {
+    if (state.mode !== "tasks") return;
+    const tf = e.target.closest("[data-tf]");
+    if (tf) { prefs.taskFilter = tf.dataset.tf; savePrefs(); return render(); }
+    const course = e.target.closest("[data-course]");
+    if (course) { state.courseFilter = course.dataset.course || null; return render(); }
+    const key = (e.target.closest("[data-tick]") || e.target.closest("[data-item]"))?.dataset;
+    if (!key) return;
+    const item = assignmentItems().find((i) => i.key === (key.tick || key.item));
+    if (!item) return;
+    if (key.tick) return toggleDone(item);
+    if (item.kind === "task") return openTaskEditor(item);
+    // A feed item (e.g. Canvas): show its details with "Mark complete" and the link back to the source.
+    openPopover({ ...item, id: item.id, start: item.due, end: item.due, description: item.notes, effective_reminders: [],
+                  recurring: false, read_only: true, location: "" }, e.target.closest("[data-item]"));
+  });
+}
+
+function taskFromItem(ev) {
+  return { kind: "task", task_id: ev.task_id, id: ev.task_id, title: ev.title, notes: ev.description, course: ev.course,
+           color: ev.color, due: ev.due, all_day: ev.all_day, done: ev.done, reminders: ev.reminders || [] };
+}
+
+function openTaskEditor(task, defaults = {}) {
+  const isNew = !task;
+  const t = task || { title: "", notes: "", course: state.courseFilter || prefs.lastCourse || "", color: null,
+                      due: defaults.due ?? ymd(addDays(new Date(), 1)), all_day: defaults.all_day ?? true, reminders: prefs.taskReminders ?? [1440] };
+  const courses = [...new Set(assignmentItems().map((i) => i.course).filter(Boolean))].sort();
+  let color = t.color && t.color !== "#8e24aa" ? t.color : "";
+  const rem = new Set(t.reminders || []);
+  const m = openModal(`<form id="taskForm">
+    <div class="modal-head"><button type="button" class="icon-btn head-x" data-x aria-label="Close">${icon("close")}</button>
+      <h2>${isNew ? "New assignment" : "Edit assignment"}</h2><button type="submit" class="btn primary head-save">Save</button></div>
+    <div class="modal-body">
+      <input class="title-input" name="title" placeholder="Assignment name" value="${esc(t.title === "(No title)" ? "" : t.title)}" required>
+      <div class="when">${dueFields(t.due, t.all_day)}</div>
+      <div class="field"><span>Course</span><input name="course" list="courseList2" value="${esc(t.course || "")}" placeholder="e.g. MATH 201">
+        <datalist id="courseList2">${courses.map((c) => `<option value="${esc(c)}">`).join("")}</datalist></div>
+      <div class="field"><span>Remind me</span><div class="chips" id="remChips">${TASK_REMINDERS.map(([v, l]) =>
+        `<button type="button" class="chip ${rem.has(v) ? "on" : ""}" data-rem="${v}">${l}</button>`).join("")}</div></div>
+      <div class="field"><span>Color</span>${colorPicker(color, { allowNone: true })}</div>
+      <div class="field"><span>Notes</span><textarea name="notes" placeholder="Details, links, rubric…">${esc(t.notes || "")}</textarea></div>
+      ${!isNew ? `<label class="toggle"><input type="checkbox" name="done" ${t.done ? "checked" : ""}> Completed</label>` : ""}
+    </div>
+    <div class="modal-foot">
+      ${isNew ? "" : `<button type="button" class="btn danger left" data-del>Delete</button>`}
+      <button type="button" class="btn text" data-x>Cancel</button>
+      <button type="submit" class="btn primary foot-save">Save</button>
+    </div></form>`);
+  const f = $("#taskForm", m);
+  setTimeout(() => f.title.focus(), 50);
+  bindColorPicker(m, (c) => (color = c));
+  $("#remChips", m).onclick = (e) => {
+    const b = e.target.closest("[data-rem]"); if (!b) return;
+    const v = Number(b.dataset.rem);
+    rem.has(v) ? rem.delete(v) : rem.add(v);
+    b.classList.toggle("on", rem.has(v));
+  };
+  $$("[data-x]", m).forEach((b) => (b.onclick = closeModal));
+  $("[data-del]", m)?.addEventListener("click", () => { closeModal(); deleteTask(t.task_id ?? t.id); });
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const body = { title: f.title.value, course: f.course.value, notes: f.notes.value, color: color || null,
+                   reminders: [...rem], ...readDue(f), ...(isNew ? {} : { done: f.done.checked }) };
+    try {
+      if (isNew) await api("/api/tasks", { method: "POST", body });
+      else await api(`/api/tasks/${t.task_id ?? t.id}`, { method: "PATCH", body });
+      if (isNew) { prefs.lastCourse = body.course; prefs.taskReminders = body.reminders; savePrefs(); }
+      closeModal();
+      toast(isNew ? "Assignment added" : "Assignment updated");
+      await refresh(true);
+      loadTaskBadge();
+    } catch (ex) { toast(ex.message); }
+  };
+}
+
+async function deleteTask(id) {
+  if (!confirm("Delete this assignment?")) return;
+  try { await api(`/api/tasks/${id}`, { method: "DELETE" }); toast("Assignment deleted"); await refresh(true); loadTaskBadge(); }
+  catch (e) { toast(e.message); }
+}
+
+// ------------------------------------------------------------------ boards
+
+async function refreshBoards(token, quiet) {
+  if (!quiet || !state.boards) render();
+  try {
+    state.boards = (await api("/api/boards")).boards;
+    if (prefs.boardId && state.boards.some((b) => b.id === prefs.boardId)) state.board = await api(`/api/boards/${prefs.boardId}`);
+    else { state.board = null; prefs.boardId = null; savePrefs(); }
+  } catch (e) { if (e.message !== "Not signed in") toast(e.message); }
+  if (token === loadToken && !boardDrag?.active) render();
+}
+
+function cardHtml(c) {
+  const badges = [];
+  if (c.due) {
+    const d = c.all_day ? parseYMD(c.due) : new Date(c.due);
+    const end = c.all_day ? addDays(d, 1) : d;
+    const cls = c.done ? "ok" : end <= new Date() ? "late" : end - new Date() < 86400000 ? "soon" : "";
+    badges.push(`<span class="due ${cls}">🕑 ${esc(fmtDate(d, { month: "short", day: "numeric" }))}${c.all_day ? "" : ", " + esc(fmtTime(d))}</span>`);
+  }
+  if (c.description) badges.push(`<span title="Has description">≡</span>`);
+  return `<div class="bcard${c.done ? " done" : ""}" data-card="${c.id}" data-pos="${c.position}" style="--c:${esc(c.label || "transparent")}">
+    ${c.label ? '<div class="lbl"></div>' : ""}<div class="bt">${esc(c.title)}</div>
+    ${badges.length ? `<div class="badges">${badges.join("")}</div>` : ""}</div>`;
+}
+
+function renderBoards(main) {
+  if (!state.boards) { main.innerHTML = `<div class="boards-home"><div class="empty-state">Loading…</div></div>`; return; }
+  if (!state.board || !prefs.boardId) {
+    main.innerHTML = `<div class="boards-home"><div class="board-tiles">
+      ${state.boards.map((b) => `<button class="board-tile" data-open-board="${b.id}" style="--c:${esc(b.color)}">${esc(b.name)}
+        <small>${b.cards} card${b.cards === 1 ? "" : "s"}</small></button>`).join("")}
+      <button class="board-tile new" data-new-board>+ Create new board</button></div>
+      ${state.boards.length ? "" : `<div class="empty-state"><b>Organize anything with boards</b>Make a board for a class project, a job search or chores, then drag cards between lists.</div>`}
+    </div>`;
+    return;
+  }
+  const { board, lists } = state.board;
+  main.innerHTML = `<div class="board" style="--c:${esc(board.color)}">
+    <div class="board-bar">
+      <button class="icon-btn" data-b="home" title="All boards" aria-label="All boards">${icon("prev")}</button>
+      <h2 data-b="rename" title="Rename">${esc(board.name)}</h2><span class="spacer"></span>
+      <button class="icon-btn" data-b="menu" title="Board menu" aria-label="Board menu">${icon("more")}</button>
+    </div>
+    <div class="board-lists">
+      ${lists.map((l) => `<div class="blist" data-list="${l.id}">
+        <div class="blist-head"><h3 data-l="rename">${esc(l.name)}</h3><span class="count">${l.cards.length}</span>
+          <button class="icon-btn small" data-l="menu" aria-label="List menu">${icon("more")}</button></div>
+        <div class="bcards" data-cards="${l.id}">${l.cards.map(cardHtml).join("")}</div>
+        <div class="blist-foot"><button class="add-card-btn" data-l="add">+ Add a card</button></div>
+      </div>`).join("")}
+      <div class="blist add-list"><button class="add-card-btn" data-add-list>+ Add another list</button></div>
+    </div></div>`;
+}
+
+function listById(id) { return state.board?.lists.find((l) => l.id === id); }
+
+function showAddCard(listEl) {
+  const foot = $(".blist-foot", listEl);
+  foot.innerHTML = `<form class="add-card-form"><textarea name="t" placeholder="Enter a title for this card…"></textarea>
+    <div class="row"><button class="btn primary">Add card</button><button type="button" class="icon-btn small" data-cancel aria-label="Cancel">${icon("close")}</button></div></form>`;
+  const f = $("form", foot);
+  f.t.focus();
+  const listId = Number(listEl.dataset.list);
+  const submit = async () => {
+    const title = f.t.value.trim();
+    if (!title) return;
+    f.t.value = "";
+    try { await api(`/api/lists/${listId}/cards`, { method: "POST", body: { title } }); await refresh(true); }
+    catch (ex) { toast(ex.message); }
+    const again = $(`[data-list="${listId}"]`);
+    if (again) { showAddCard(again); const cards = $(".bcards", again); cards.scrollTop = cards.scrollHeight; }
+  };
+  f.onsubmit = (e) => { e.preventDefault(); submit(); };
+  f.t.onkeydown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+    if (e.key === "Escape") render();
+  };
+  $("[data-cancel]", f).onclick = () => render();
+}
+
+function showAddList(el) {
+  el.innerHTML = `<form><input name="n" placeholder="List name" autocomplete="off">
+    <div class="row" style="margin-top:6px"><button class="btn primary">Add list</button>
+    <button type="button" class="icon-btn small" data-cancel aria-label="Cancel">${icon("close")}</button></div></form>`;
+  const f = $("form", el);
+  f.n.focus();
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    if (!f.n.value.trim()) return;
+    try { await api(`/api/boards/${prefs.boardId}/lists`, { method: "POST", body: { name: f.n.value } }); await refresh(true); }
+    catch (ex) { toast(ex.message); }
+    // Keep the box open for the next list, scrolled into view.
+    const box = $("[data-add-list]")?.parentElement;
+    if (box) { showAddList(box); box.scrollIntoView({ inline: "end", block: "nearest", behavior: "smooth" }); }
+  };
+  f.n.onkeydown = (e) => { if (e.key === "Escape") render(); };
+  $("[data-cancel]", f).onclick = () => render();
+}
+
+function boardDialog(board) {
+  const isNew = !board;
+  let color = board?.color || COLORS[5];
+  const m = openModal(`<form id="boardForm"><div class="modal-head"><h2>${isNew ? "Create board" : "Board settings"}</h2></div>
+    <div class="modal-body"><div class="field"><span>Board name</span><input name="name" value="${esc(board?.name || "")}" placeholder="e.g. Group project" required autocomplete="off"></div>
+      <div class="field"><span>Color</span>${colorPicker(color)}</div>
+      ${isNew ? `<p class="muted" style="font-size:13px">Starts with To do, Doing and Done lists. You can rename or add more.</p>` : ""}</div>
+    <div class="modal-foot">${isNew ? "" : `<button type="button" class="btn danger left" data-del>Delete board</button>`}
+      <button type="button" class="btn text" data-x>Cancel</button><button class="btn primary">${isNew ? "Create" : "Save"}</button></div></form>`);
+  const f = $("#boardForm", m);
+  setTimeout(() => f.name.focus(), 50);
+  bindColorPicker(m, (c) => (color = c));
+  $("[data-x]", m).onclick = closeModal;
+  $("[data-del]", m)?.addEventListener("click", async () => {
+    if (!confirm(`Delete the board "${board.name}" and all its cards?`)) return;
+    await api(`/api/boards/${board.id}`, { method: "DELETE" });
+    closeModal(); prefs.boardId = null; savePrefs(); refresh();
+  });
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      if (isNew) { const r = await api("/api/boards", { method: "POST", body: { name: f.name.value, color } }); prefs.boardId = r.id; savePrefs(); }
+      else await api(`/api/boards/${board.id}`, { method: "PATCH", body: { name: f.name.value, color } });
+      closeModal();
+      refresh();
+    } catch (ex) { toast(ex.message); }
+  };
+}
+
+function openCardDialog(card) {
+  const lists = state.board?.lists || [];
+  let label = card.label || "";
+  const m = openModal(`<form id="cardForm">
+    <div class="modal-head"><button type="button" class="icon-btn head-x" data-x aria-label="Close">${icon("close")}</button>
+      <h2>Card</h2><button type="submit" class="btn primary head-save">Save</button></div>
+    <div class="modal-body">
+      <input class="title-input" name="title" value="${esc(card.title === "(No title)" ? "" : card.title)}" placeholder="Card title" required>
+      <div class="field"><span>List</span><select name="list">${lists.map((l) => `<option value="${l.id}" ${l.id === card.list_id ? "selected" : ""}>${esc(l.name)}</option>`).join("")}</select></div>
+      <div class="field"><span>Label</span>${colorPicker(label, { allowNone: true })}</div>
+      <div class="when">${dueFields(card.due, card.all_day)}</div>
+      <label class="toggle" style="margin:10px 0"><input type="checkbox" name="done" ${card.done ? "checked" : ""}> Completed</label>
+      <div class="field"><span>Description</span><textarea name="description" placeholder="Add a more detailed description…">${esc(card.description || "")}</textarea></div>
+      <p class="muted" style="font-size:12px">Cards with a due date also show on your calendar.</p>
+    </div>
+    <div class="modal-foot"><button type="button" class="btn danger left" data-del>Delete</button>
+      <button type="button" class="btn text" data-x>Cancel</button><button type="submit" class="btn primary foot-save">Save</button></div></form>`);
+  const f = $("#cardForm", m);
+  bindColorPicker(m, (c) => (label = c));
+  $$("[data-x]", m).forEach((b) => (b.onclick = closeModal));
+  $("[data-del]", m).onclick = () => { closeModal(); deleteCard(card.id); };
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const body = { title: f.title.value, description: f.description.value, label: label || null, done: f.done.checked, ...readDue(f) };
+    if (Number(f.list.value) !== card.list_id) body.list_id = Number(f.list.value);
+    try { await api(`/api/cards/${card.id}`, { method: "PATCH", body }); closeModal(); await refresh(true); }
+    catch (ex) { toast(ex.message); }
+  };
+}
+
+async function openCardById(boardId, cardId) {
+  try {
+    if (state.board?.board.id !== boardId) state.board = await api(`/api/boards/${boardId}`);
+    const card = state.board.lists.flatMap((l) => l.cards).find((c) => c.id === cardId);
+    if (card) openCardDialog(card);
+  } catch (e) { toast(e.message); }
+}
+
+async function deleteCard(id) {
+  if (!confirm("Delete this card?")) return;
+  try { await api(`/api/cards/${id}`, { method: "DELETE" }); toast("Card deleted"); await refresh(true); }
+  catch (e) { toast(e.message); }
+}
+
+async function moveList(list, dir) {
+  const lists = state.board.lists;
+  const i = lists.indexOf(list), j = i + dir;
+  if (j < 0 || j >= lists.length) return;
+  // Swap positions with the neighbour.
+  await api(`/api/lists/${list.id}`, { method: "PATCH", body: { position: lists[j].position } });
+  await api(`/api/lists/${lists[j].id}`, { method: "PATCH", body: { position: list.position } });
+  refresh(true);
+}
+
+// Card drag & drop: mouse drags right away; touch needs a long-press so normal swiping still scrolls.
+let boardDrag = null;
+function bindBoards(main) {
+  main.addEventListener("click", async (e) => {
+    if (state.mode !== "boards") return;
+    if (boardDrag?.justDropped) return;
+    const t = e.target;
+    const open = t.closest("[data-open-board]");
+    if (open) { prefs.boardId = Number(open.dataset.openBoard); savePrefs(); return refresh(); }
+    if (t.closest("[data-new-board]")) return boardDialog(null);
+    const b = t.closest("[data-b]")?.dataset.b;
+    if (b === "home") { prefs.boardId = null; savePrefs(); state.board = null; return refresh(); }
+    if (b === "rename" || b === "menu") return boardDialog(state.board.board);
+    const listEl = t.closest("[data-list]");
+    const l = t.closest("[data-l]")?.dataset.l;
+    if (listEl && l) {
+      const list = listById(Number(listEl.dataset.list));
+      const rename = async () => {
+        const name = await promptDialog("Rename list", list.name);
+        if (name) { await api(`/api/lists/${list.id}`, { method: "PATCH", body: { name } }); refresh(true); }
+      };
+      if (l === "add") return showAddCard(listEl);
+      if (l === "rename") return rename();
+      if (l === "menu") {
+        return showMenu(t.closest("[data-l]"), [
+          { label: "Add card", run: () => showAddCard(listEl) },
+          { label: "Rename list", run: rename },
+          { label: "Move list left", run: () => moveList(list, -1) },
+          { label: "Move list right", run: () => moveList(list, 1) },
+          { label: "Delete list", danger: true, run: async () => {
+            if (!confirm(`Delete the list "${list.name}"${list.cards.length ? ` and its ${list.cards.length} card(s)` : ""}?`)) return;
+            await api(`/api/lists/${list.id}`, { method: "DELETE" }); refresh(true);
+          } },
+        ]);
+      }
+    }
+    if (t.closest("[data-add-list]")) return showAddList(t.closest(".add-list"));
+    const cardEl = t.closest("[data-card]");
+    if (cardEl) {
+      const card = state.board.lists.flatMap((x) => x.cards).find((c) => c.id === Number(cardEl.dataset.card));
+      if (card) openCardDialog(card);
+    }
+  });
+
+  main.addEventListener("pointerdown", (e) => {
+    if (state.mode !== "boards" || e.button !== 0) return;
+    const el = e.target.closest(".bcard");
+    if (!el) return;
+    boardDrag = { el, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, active: false, touch: e.pointerType !== "mouse" };
+    if (boardDrag.touch) {
+      const d = boardDrag;
+      d.timer = setTimeout(() => { if (boardDrag === d) { beginCardDrag(d); navigator.vibrate?.(15); } }, 380);
+    }
+  });
+  window.addEventListener("pointermove", (e) => {
+    const d = boardDrag;
+    if (!d || d.justDropped) return;
+    d.x = e.clientX; d.y = e.clientY;
+    if (!d.active) {
+      const moved = Math.hypot(e.clientX - d.x0, e.clientY - d.y0);
+      if (d.touch && moved > 10) { clearTimeout(d.timer); boardDrag = null; }   // it's a scroll, not a drag
+      else if (!d.touch && moved > 5) beginCardDrag(d);
+      return;
+    }
+    moveCardDrag(d);
+  });
+  const finish = () => {
+    const d = boardDrag;
+    if (!d) return;
+    clearTimeout(d.timer);
+    if (d.active) endCardDrag(d);
+    else boardDrag = null;
+  };
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+  // Once a touch drag has started, stop the page from scrolling under the finger.
+  document.addEventListener("touchmove", (e) => { if (boardDrag?.active) e.preventDefault(); }, { passive: false });
+  document.addEventListener("contextmenu", (e) => { if (boardDrag) e.preventDefault(); });
+}
+
+function beginCardDrag(d) {
+  const r = d.el.getBoundingClientRect();
+  d.active = true;
+  d.dx = d.x0 - r.left; d.dy = d.y0 - r.top;
+  d.fromList = d.el.closest("[data-list]").dataset.list;
+  d.fromIndex = [...d.el.parentElement.children].indexOf(d.el);
+  d.clone = d.el.cloneNode(true);
+  d.clone.classList.add("drag-clone");
+  d.clone.style.width = `${r.width}px`;
+  document.body.appendChild(d.clone);
+  d.el.classList.add("placeholder");
+  $(".board")?.classList.add("dragging");
+  moveCardDrag(d);
+  const tick = () => { if (!d.active) return; autoScroll(d); d.raf = requestAnimationFrame(tick); };
+  d.raf = requestAnimationFrame(tick);
+}
+
+function moveCardDrag(d) {
+  d.clone.style.left = `${d.x - d.dx}px`;
+  d.clone.style.top = `${d.y - d.dy}px`;
+  const listEl = document.elementsFromPoint(d.x, d.y).map((n) => n.closest?.("[data-list]")).find(Boolean);
+  if (!listEl) return;
+  const cards = $(".bcards", listEl);
+  const others = [...cards.children].filter((c) => c !== d.el);
+  const before = others.find((c) => { const r = c.getBoundingClientRect(); return d.y < r.top + r.height / 2; });
+  if (before) { if (d.el.nextElementSibling !== before) cards.insertBefore(d.el, before); }
+  else if (cards.lastElementChild !== d.el) cards.appendChild(d.el);
+}
+
+function autoScroll(d) {
+  const lists = $(".board-lists");
+  if (!lists) return;
+  const r = lists.getBoundingClientRect();
+  const edge = 48;
+  if (d.x < r.left + edge) lists.scrollLeft -= 14;
+  else if (d.x > r.right - edge) lists.scrollLeft += 14;
+  const cards = d.el.closest(".bcards");
+  if (cards) {
+    const cr = cards.getBoundingClientRect();
+    if (d.y < cr.top + 32) cards.scrollTop -= 10;
+    else if (d.y > cr.bottom - 32) cards.scrollTop += 10;
+  }
+  moveCardDrag(d);
+}
+
+async function endCardDrag(d) {
+  cancelAnimationFrame(d.raf);
+  d.active = false;
+  d.justDropped = true;
+  setTimeout(() => { if (boardDrag === d) boardDrag = null; }, 0);
+  d.clone.remove();
+  d.el.classList.remove("placeholder");
+  $(".board")?.classList.remove("dragging");
+  const listEl = d.el.closest("[data-list]");
+  const listId = Number(listEl.dataset.list);
+  const index = [...d.el.parentElement.children].indexOf(d.el);
+  if (String(listId) === d.fromList && index === d.fromIndex) return;
+  const prev = d.el.previousElementSibling, next = d.el.nextElementSibling;
+  const p = prev ? Number(prev.dataset.pos) : null, n = next ? Number(next.dataset.pos) : null;
+  const position = p != null && n != null ? (p + n) / 2 : p != null ? p + 1024 : n != null ? n - 1024 : 1024;
+  d.el.dataset.pos = position;
+  try {
+    await api(`/api/cards/${d.el.dataset.card}`, { method: "PATCH", body: { list_id: listId, position } });
+    await refresh(true);
+  } catch (e) { toast(e.message); refresh(true); }
+}
+
 // ------------------------------------------------------------------ connection check
 
 // Keep every resource the page loads (the browser's default buffer is small) and any URL the
@@ -1457,8 +2129,18 @@ function bindUI() {
   $("#nextBtn").onclick = () => go(1);
   $("#viewSelect").onchange = (e) => setView(e.target.value);
   $("#settingsBtn").onclick = () => settingsDialog();
-  $("#createBtn").onclick = () => openEditor(null);
-  $("#fab").onclick = () => openEditor(null);
+  const create = () => (state.mode === "tasks" ? openTaskEditor(null) : state.mode === "calendar" ? openEditor(null) : null);
+  $("#createBtn").onclick = create;
+  $("#fab").onclick = create;
+  for (const nav of ["#modeNav", "#bottomNav"]) {
+    $(nav).onclick = (e) => {
+      const m = e.target.closest("[data-mode]")?.dataset.mode;
+      if (!m) return;
+      // Tapping Boards again while a board is open goes back to the list of boards.
+      if (m === "boards" && state.mode === "boards" && prefs.boardId) { prefs.boardId = null; savePrefs(); state.board = null; }
+      setMode(m);
+    };
+  }
   $("#addCalBtn").onclick = () => addCalendarDialog();
 
   const sw = $("#searchWrap"), si = $("#searchInput");
@@ -1483,7 +2165,7 @@ function bindUI() {
   $("#miniDrop").onclick = miniClick;
 
   // phone header + drawer
-  $("#titleBtn").onclick = () => { if (isMobile()) setMiniDrop($("#miniDrop").hidden); };
+  $("#titleBtn").onclick = () => { if (isMobile() && state.mode === "calendar") setMiniDrop($("#miniDrop").hidden); };
   $("#todayIconBtn").onclick = () => { setMiniDrop(false); gotoDate(new Date()); };
   $("#viewList").onclick = (e) => {
     const v = e.target.closest("[data-view]")?.dataset.view;
@@ -1494,6 +2176,12 @@ function bindUI() {
   $("#drawerSettings").onclick = () => { $("#app").classList.remove("sidebar-open"); settingsDialog(); };
 
   const calLists = (e) => {
+    const k = e.target.closest("[data-toggle-kind]");
+    if (k) {
+      if (k.dataset.toggleKind === "task") prefs.showTasks = k.checked; else prefs.showCards = k.checked;
+      savePrefs();
+      return refresh(true);
+    }
     const t = e.target.closest("[data-toggle]");
     if (t) {
       const cal = calById(Number(t.dataset.toggle));
@@ -1509,6 +2197,8 @@ function bindUI() {
 
   const main = $("#main");
   bindGrid(main);
+  bindTasks(main);
+  bindBoards(main);
   main.addEventListener("click", (e) => {
     if (suppressClick) return;
     const evEl = e.target.closest("[data-ev]");
@@ -1540,7 +2230,7 @@ function bindUI() {
   let tx = null;
   main.addEventListener("touchstart", (e) => { tx = e.touches.length === 1 ? [e.touches[0].clientX, e.touches[0].clientY, Date.now()] : null; }, { passive: true });
   main.addEventListener("touchend", (e) => {
-    if (!tx || state.search) return;
+    if (!tx || state.search || state.mode !== "calendar") return;
     const t = e.changedTouches[0];
     const dx = t.clientX - tx[0], dy = t.clientY - tx[1];
     if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.8 && Date.now() - tx[2] < 600) go(dx < 0 ? 1 : -1);
@@ -1562,7 +2252,9 @@ function bindUI() {
     const k = e.key.toLowerCase();
     const map = { t: () => gotoDate(new Date()), j: () => go(1), n: () => go(1), arrowright: () => go(1), k: () => go(-1), p: () => go(-1), arrowleft: () => go(-1),
       d: () => setView("day"), x: () => setView("3day"), w: () => setView("week"), m: () => setView("month"), a: () => setView("schedule"),
-      c: () => openEditor(null), "/": () => { $("#searchWrap").classList.add("open"); $("#searchInput").focus(); } };
+      c: create, "/": () => { $("#searchWrap").classList.add("open"); $("#searchInput").focus(); } };
+    // Outside the calendar only "create" and the view keys (which jump back to the calendar) apply.
+    if (state.mode !== "calendar" && !"cdxwma".includes(k)) return;
     if (map[k]) { e.preventDefault(); map[k](); }
   });
 

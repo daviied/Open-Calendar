@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from py_vapid import Vapid01
 from pywebpush import WebPushException, webpush
 
-from . import config, db
+from . import config, db, tasks
 from .events import UTC, get_zone, list_occurrences, parse_date, parse_dt
 
 log = logging.getLogger("calendar.push")
@@ -61,6 +61,13 @@ def send_to_all(payload: dict) -> int:
 
 
 def _start_time(occ: dict) -> datetime:
+    if occ.get("kind") == "task":
+        # Reminders count back from the deadline; a date-only deadline counts as 9am that day.
+        if occ["all_day"]:
+            d = parse_date(occ["due"])
+            zone = get_zone(db.get_setting("timezone", "UTC"))
+            return datetime(d.year, d.month, d.day, 9, tzinfo=zone).astimezone(UTC)
+        return parse_dt(occ["due"])
     if occ["all_day"]:
         # All-day reminders are relative to local midnight in the server's configured zone.
         d = parse_date(occ["start"])
@@ -70,6 +77,12 @@ def _start_time(occ: dict) -> datetime:
 
 
 def _when_text(occ: dict, minutes: int) -> str:
+    if occ.get("kind") == "task":
+        prefix = f"{occ['course']} · " if occ.get("course") else ""
+        if minutes == 0:
+            return prefix + ("Due today" if occ["all_day"] else "Due now")
+        relative = _when_text({**occ, "kind": None, "all_day": False}, minutes)  # e.g. "In 1 day"
+        return f"{prefix}Due {relative[0].lower()}{relative[1:]}"
     if occ["all_day"]:
         return "All day" if minutes == 0 else "All-day event"
     if minutes == 0:
@@ -87,13 +100,15 @@ def check_reminders() -> None:
     if not db.one("SELECT id FROM push_subscriptions LIMIT 1"):
         return
     now = datetime.now(UTC)
-    for occ in list_occurrences(now - GRACE, now + LOOKAHEAD):
+    items = list_occurrences(now - GRACE, now + LOOKAHEAD) + tasks.calendar_items(now - GRACE, now + LOOKAHEAD)
+    for occ in items:
         start = _start_time(occ)
         for minutes in occ["effective_reminders"]:
             fire_at = start - timedelta(minutes=minutes)
             if not (now - GRACE <= fire_at <= now):
                 continue
-            key = f"{occ['id']}|{minutes}"
+            # Includes the time, so moving an event or deadline re-arms its reminders.
+            key = f"{occ['id']}|{occ['start']}|{minutes}"
             if db.one("SELECT key FROM sent_notifications WHERE key=?", (key,)):
                 continue
             db.execute("INSERT OR IGNORE INTO sent_notifications(key, sent_at) VALUES(?, ?)", (key, time.time()))

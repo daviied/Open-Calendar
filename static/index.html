@@ -70,6 +70,11 @@
         <div class="drawer-head">
           <img src="/icons/icon.svg" alt="" width="28" height="28"><span>Calendar</span>
         </div>
+        <nav class="mode-nav" id="modeNav" aria-label="Sections">
+          <button data-mode="calendar"><svg viewBox="0 0 24 24"><path d="M19 4h-1V2h-2v2H8V2H6v2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2m0 16H5V9h14zM7 11h5v5H7z"/></svg>Calendar</button>
+          <button data-mode="tasks"><svg viewBox="0 0 24 24"><path d="M19 3h-4.2A3 3 0 0 0 12 1a3 3 0 0 0-2.8 2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2m-7 0a1 1 0 1 1 0 2 1 1 0 0 1 0-2m-2 14-4-4 1.4-1.4 2.6 2.6 6.6-6.6L18 9z"/></svg>Assignments<span class="badge" id="taskBadge" hidden></span></button>
+          <button data-mode="boards"><svg viewBox="0 0 24 24"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2M10 17H6V7h4zm8-5h-4V7h4z"/></svg>Boards</button>
+        </nav>
         <nav class="view-list" id="viewList" aria-label="Views">
           <button data-view="schedule"><svg viewBox="0 0 24 24"><path d="M3 5h2v2H3zm4 0h14v2H7zm-4 6h2v2H3zm4 0h14v2H7zm-4 6h2v2H3zm4 0h14v2H7z"/></svg>Schedule</button>
           <button data-view="day"><svg viewBox="0 0 24 24"><path d="M19 4h-1V2h-2v2H8V2H6v2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2m0 16H5V9h14zM7 11h10v7H7z"/></svg>Day</button>
@@ -103,9 +108,15 @@
       <main class="main" id="main"></main>
     </div>
 
-    <button class="fab" id="fab" aria-label="Create event">
+    <button class="fab" id="fab" aria-label="Create">
       <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
     </button>
+
+    <nav class="bottom-nav" id="bottomNav" aria-label="Sections">
+      <button data-mode="calendar"><svg viewBox="0 0 24 24"><path d="M19 4h-1V2h-2v2H8V2H6v2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2m0 16H5V9h14zM7 11h5v5H7z"/></svg><span>Calendar</span></button>
+      <button data-mode="tasks"><svg viewBox="0 0 24 24"><path d="M19 3h-4.2A3 3 0 0 0 12 1a3 3 0 0 0-2.8 2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2m-7 0a1 1 0 1 1 0 2 1 1 0 0 1 0-2m-2 14-4-4 1.4-1.4 2.6 2.6 6.6-6.6L18 9z"/></svg><span>Assignments</span><i class="badge" id="taskBadgeMobile" hidden></i></button>
+      <button data-mode="boards"><svg viewBox="0 0 24 24"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2M10 17H6V7h4zm8-5h-4V7h4z"/></svg><span>Boards</span></button>
+    </nav>
   </div>
 
   <!-- Login / setup -->

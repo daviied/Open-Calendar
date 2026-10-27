@@ -71,7 +71,66 @@ CREATE TABLE IF NOT EXISTS sent_notifications (
     key TEXT PRIMARY KEY,
     sent_at REAL
 );
+
+-- Assignments / to-dos with a due date
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    course TEXT NOT NULL DEFAULT '',
+    color TEXT,
+    due TEXT,                -- UTC 'YYYY-MM-DDTHH:MM:SSZ', or 'YYYY-MM-DD' when all_day; NULL = no due date
+    all_day INTEGER NOT NULL DEFAULT 0,
+    done INTEGER NOT NULL DEFAULT 0,
+    done_at REAL,
+    reminders TEXT NOT NULL DEFAULT '[]',
+    created_at REAL,
+    updated_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(due);
+
+-- "Done" check marks on events from calendars shown as assignments (e.g. a Canvas feed)
+CREATE TABLE IF NOT EXISTS event_done (
+    calendar_id INTEGER NOT NULL REFERENCES calendars(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    done_at REAL,
+    PRIMARY KEY (calendar_id, key)
+);
+
+-- Trello-style boards
+CREATE TABLE IF NOT EXISTS boards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL DEFAULT '#0b8043',
+    position REAL NOT NULL DEFAULT 0,
+    created_at REAL
+);
+CREATE TABLE IF NOT EXISTS board_lists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    board_id INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    position REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    list_id INTEGER NOT NULL REFERENCES board_lists(id) ON DELETE CASCADE,
+    title TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    label TEXT,
+    due TEXT,
+    all_day INTEGER NOT NULL DEFAULT 0,
+    done INTEGER NOT NULL DEFAULT 0,
+    position REAL NOT NULL DEFAULT 0,
+    created_at REAL,
+    updated_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_cards_list ON cards(list_id);
 """
+
+# Columns added after the first release; created on startup if an older database lacks them.
+MIGRATIONS = [
+    ("calendars", "assignments", "INTEGER NOT NULL DEFAULT 0"),
+]
 
 _lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
@@ -85,6 +144,10 @@ def connect() -> sqlite3.Connection:
         _conn.execute("PRAGMA journal_mode=WAL")
         _conn.execute("PRAGMA foreign_keys=ON")
         _conn.executescript(SCHEMA)
+        for table, column, decl in MIGRATIONS:
+            cols = {r["name"] for r in _conn.execute(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                _conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
     return _conn
 
 

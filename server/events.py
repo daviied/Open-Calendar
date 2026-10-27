@@ -74,10 +74,20 @@ def _calendar_map() -> dict[int, dict]:
     return {c["id"]: c for c in db.query("SELECT * FROM calendars")}
 
 
-def _serialize(ev: dict, cal: dict, start: str, end: str, recurring: bool) -> dict:
+def _serialize(ev: dict, cal: dict, start: str, end: str, recurring: bool, done_keys: set | None = None) -> dict:
     occ_id = f"{ev['id']}:{start}" if recurring else str(ev["id"])
     reminders = ev["reminders"]
+    # Calendars shown as assignments (e.g. Canvas) can have their events checked off.
+    done_key = f"{ev['uid']}|{start}" if recurring else (ev["uid"] or str(ev["id"]))
+    is_assignment = bool(cal.get("assignments"))
+    done = is_assignment and (cal["id"], done_key) in (done_keys or set())
+    effective = json.loads(reminders if reminders is not None else cal["default_reminders"])
     return {
+        "kind": "event",
+        "assignment": is_assignment,
+        "done": done,
+        "done_key": done_key,
+        "calendar_name": cal["name"],
         "id": occ_id,
         "event_id": ev["id"],
         "calendar_id": ev["calendar_id"],
@@ -93,16 +103,17 @@ def _serialize(ev: dict, cal: dict, start: str, end: str, recurring: bool) -> di
         "series_end": ev["end"],
         "tz": ev["tz"],
         "reminders": json.loads(reminders) if reminders is not None else None,
-        "effective_reminders": json.loads(reminders if reminders is not None else cal["default_reminders"]),
+        "effective_reminders": [] if done else effective,
         "color": ev["color"] or cal["color"],
         "url": ev["url"],
         "read_only": bool(cal["read_only"]),
     }
 
 
-def expand_event(ev: dict, cal: dict, range_start: datetime, range_end: datetime) -> list[dict]:
+def expand_event(ev: dict, cal: dict, range_start: datetime, range_end: datetime,
+                 done_keys: set | None = None) -> list[dict]:
     if not ev["rrule"]:
-        return [_serialize(ev, cal, ev["start"], ev["end"], False)]
+        return [_serialize(ev, cal, ev["start"], ev["end"], False, done_keys)]
 
     exdates = set(json.loads(ev["exdates"] or "[]"))
     out = []
@@ -117,7 +128,7 @@ def expand_event(ev: dict, cal: dict, range_start: datetime, range_end: datetime
                 start = occ.date().isoformat()
                 if start in exdates:
                     continue
-                out.append(_serialize(ev, cal, start, (occ.date() + dur).isoformat(), True))
+                out.append(_serialize(ev, cal, start, (occ.date() + dur).isoformat(), True, done_keys))
         else:
             zone = get_zone(ev["tz"])
             s, e = parse_dt(ev["start"]), parse_dt(ev["end"])
@@ -128,10 +139,10 @@ def expand_event(ev: dict, cal: dict, range_start: datetime, range_end: datetime
                 start = fmt_utc(occ)
                 if start in exdates:
                     continue
-                out.append(_serialize(ev, cal, start, fmt_utc(occ + dur), True))
+                out.append(_serialize(ev, cal, start, fmt_utc(occ + dur), True, done_keys))
     except (ValueError, TypeError):
         # A rule we can't parse: show the first instance only.
-        return [_serialize(ev, cal, ev["start"], ev["end"], False)]
+        return [_serialize(ev, cal, ev["start"], ev["end"], False, done_keys)]
     return out
 
 
@@ -148,12 +159,13 @@ def list_occurrences(range_start: datetime, range_end: datetime, visible_only=Tr
              OR (rrule IS NOT NULL AND start < ?)""",
         (re_, rs, re_d, rs_d, re_d),
     )
+    done_keys = {(r["calendar_id"], r["key"]) for r in db.query("SELECT calendar_id, key FROM event_done")}
     out = []
     for ev in rows:
         cal = cals.get(ev["calendar_id"])
         if not cal or (visible_only and not cal["visible"]):
             continue
-        out.extend(expand_event(ev, cal, range_start, range_end))
+        out.extend(expand_event(ev, cal, range_start, range_end, done_keys))
     out.sort(key=lambda o: (o["start"], not o["all_day"]))
     return out
 

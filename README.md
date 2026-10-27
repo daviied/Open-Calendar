@@ -9,6 +9,11 @@ sends **push notifications** for event reminders even when the app is closed.
 - Recurring events (daily / weekly / monthly / yearly / custom), with "this event / this and
   following / all events" editing
 - Multiple calendars with colors, show/hide, per-calendar default reminders
+- **Assignments:** due dates (with or without a time), courses, notes and reminders. Check them off, see them
+  grouped as Overdue / Today / Tomorrow / This week / Later, and see them on the calendar. Canvas feed items can show
+  up here too.
+- **Boards:** Trello-style boards with lists and cards. Drag cards between lists (long-press on phones). Cards can
+  have labels, descriptions and due dates, and cards with due dates also show on the calendar.
 - Works offline with the last loaded data
 - Single-user, password protected, data stored in one SQLite file
 
@@ -75,6 +80,10 @@ Canvas calendars come in as a feed. They're read-only, and that's all Canvas off
 
 Feeds refresh every 15 minutes (`CAL_SYNC_INTERVAL`).
 
+Leave **Show in Assignments** ticked when you subscribe. Canvas items then appear on the Assignments tab, with the
+course name taken from the `[COURSE]` part of the title, and you can check them off there. You can turn this on
+or off later for any calendar from the ⋮ menu next to it.
+
 ### Google Calendar
 
 **Option A: two-way sync (recommended).** Events you add or edit show up in both places.
@@ -138,6 +147,7 @@ server/        FastAPI backend
   app.py       HTTP API, auth, static files
   events.py    event storage + recurrence expansion
   sync.py      ICS feeds, Google Calendar API, Microsoft Graph
+  tasks.py     assignments and boards
   push.py      Web Push reminders
 static/        the PWA (vanilla JS, no build step)
 scripts/       icon generator
