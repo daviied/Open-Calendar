@@ -201,8 +201,14 @@ function showLogin(setup) {
     if (setup && pw !== $("#loginPassword2").value) { err.textContent = "Passwords don't match"; err.hidden = false; return; }
     try {
       await api(setup ? "/api/setup" : "/api/login", { method: "POST", body: { password: pw } });
+      const me = await api("/api/me");
+      if (!me.authenticated) {
+        err.textContent = "Signed in, but your browser didn't keep the login cookie. Check that cookies are allowed for this site.";
+        err.hidden = false;
+        return;
+      }
       $("#login").hidden = true;
-      state.me = await api("/api/me");
+      state.me = me;
       await start();
     } catch (ex) { err.textContent = ex.message; err.hidden = false; }
   };

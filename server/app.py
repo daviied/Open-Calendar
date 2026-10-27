@@ -105,13 +105,19 @@ async def auth_middleware(request: Request, call_next):
     response = await call_next(request)
     if path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
+    if request.url.scheme == "https":
+        # Behind an HTTPS proxy, have the browser upgrade any stray http:// request instead of
+        # flagging the page as "not secure". Only sent over HTTPS so plain-http LAN access keeps working.
+        response.headers["Content-Security-Policy"] = "upgrade-insecure-requests"
     return response
 
 
-def _login_response() -> JSONResponse:
+def _login_response(request: Request) -> JSONResponse:
     resp = JSONResponse({"ok": True})
+    # Mark the cookie secure only when this request really came over HTTPS (directly or via a
+    # proxy's X-Forwarded-Proto); otherwise browsers drop it and sign-in silently fails.
     resp.set_cookie(COOKIE, _signer().sign("user").decode(), max_age=SESSION_AGE, httponly=True,
-                    samesite="lax", secure=config.BASE_URL.startswith("https"))
+                    samesite="lax", secure=request.url.scheme == "https")
     return resp
 
 
@@ -140,7 +146,7 @@ async def setup(request: Request):
     if len(password) < 6:
         raise HTTPException(400, "Password must be at least 6 characters")
     db.set_setting("password_hash", _hash_password(password))
-    return _login_response()
+    return _login_response(request)
 
 
 @app.post("/api/login")
@@ -149,7 +155,7 @@ async def login(request: Request):
     if not _check_password(body.get("password", "")):
         await asyncio.sleep(1)
         raise HTTPException(401, "Wrong password")
-    return _login_response()
+    return _login_response(request)
 
 
 @app.post("/api/logout")
